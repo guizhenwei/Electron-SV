@@ -81,7 +81,7 @@ class BaseWizard(object):
         wallet_kinds = [
             ('standard',  _("Standard wallet")),
             ('multisig',  _("Multi-signature wallet")),
-            ('imported',  _("Import Bitcoin addresses or private keys")),
+            ('imported',  _("Import Bitcoin Cash addresses or private keys")),
         ]
         choices = [pair for pair in wallet_kinds if pair[0] in wallet_types]
         self.choice_dialog(title=title, message=message, choices=choices, run_next=self.on_wallet_type)
@@ -131,7 +131,7 @@ class BaseWizard(object):
     def import_addresses_or_keys(self):
         v = lambda x: keystore.is_address_list(x) or keystore.is_private_key_list(x)
         title = _("Import Bitcoin Addresses")
-        message = _("Enter a list of Bitcoin addresses (this will create a watching-only wallet), or a list of private keys.")
+        message = _("Enter a list of Bitcoin Cash addresses (this will create a watching-only wallet), or a list of private keys.")
         self.add_xpub_dialog(title=title, message=message, run_next=self.on_import,
                              is_valid=v, allow_multi=True)
 
@@ -199,7 +199,7 @@ class BaseWizard(object):
         choices = []
         for name, info in devices:
             state = _("initialized") if info.initialized else _("wiped")
-            label = info.label or _("An unnamed %s")%name
+            label = info.label or _("An unnamed {}").format(name)
             descr = "%s [%s, %s]" % (label, name, state)
             choices.append(((name, info), descr))
         msg = _('Select a device') + ':'
@@ -209,6 +209,15 @@ class BaseWizard(object):
         self.plugin = self.plugins.get_plugin(name)
         try:
             self.plugin.setup_device(device_info, self)
+        except OSError as e:
+            self.show_error(_('We encountered an error while connecting to your device:')
+                            + '\n' + str(e) + '\n'
+                            + _('To try to fix this, we will now re-pair with your device.') + '\n'
+                            + _('Please try again.'))
+            devmgr = self.plugins.device_manager
+            devmgr.unpair_id(device_info.device.id_)
+            self.choose_hw_device()
+            return
         except BaseException as e:
             self.show_error(str(e))
             self.choose_hw_device()

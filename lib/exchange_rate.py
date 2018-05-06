@@ -2,9 +2,12 @@ from datetime import datetime
 import inspect
 import requests
 import sys
+import os
+import json
 from threading import Thread
 import time
 import csv
+import decimal
 from decimal import Decimal
 
 from .bitcoin import COIN
@@ -32,7 +35,7 @@ class ExchangeBase(PrintError):
     def get_json(self, site, get_string):
         # APIs must have https
         url = ''.join(['https://', site, get_string])
-        response = requests.request('GET', url, headers={'User-Agent' : 'Electron Cash'})
+        response = requests.request('GET', url, headers={'User-Agent' : 'Electron Cash'}, timeout=10)
         return response.json()
 
     def get_csv(self, site, get_string):
@@ -58,19 +61,44 @@ class ExchangeBase(PrintError):
         t.setDaemon(True)
         t.start()
 
-    def get_historical_rates_safe(self, ccy):
-        try:
-            self.print_error("requesting fx history for", ccy)
-            self.history[ccy] = self.historical_rates(ccy)
-            self.print_error("received fx history for", ccy)
+    def read_historical_rates(self, ccy, cache_dir):
+        filename = os.path.join(cache_dir, self.name() + '_'+ ccy)
+        if os.path.exists(filename):
+            timestamp = os.stat(filename).st_mtime
+            try:
+                with open(filename, 'r') as f:
+                    h = json.loads(f.read())
+            except:
+                h = None
+        else:
+            h = None
+            timestamp = False
+        if h:
+            self.history[ccy] = h
             self.on_history()
-        except BaseException as e:
-            self.print_error("failed fx history:", e)
+        return h, timestamp
 
-    def get_historical_rates(self, ccy):
+    def get_historical_rates_safe(self, ccy, cache_dir):
+        h, timestamp = self.read_historical_rates(ccy, cache_dir)
+        if h is None or time.time() - timestamp < 24*3600:
+            try:
+                self.print_error("requesting fx history for", ccy)
+                h = self.request_history(ccy)
+                self.print_error("received fx history for", ccy)
+                self.on_history()
+            except BaseException as e:
+                self.print_error("failed fx history:", e)
+                return
+            filename = os.path.join(cache_dir, self.name() + '_' + ccy)
+            with open(filename, 'w') as f:
+                f.write(json.dumps(h))
+        self.history[ccy] = h
+        self.on_history()
+
+    def get_historical_rates(self, ccy, cache_dir):
         result = self.history.get(ccy)
         if not result and ccy in self.history_ccys():
-            t = Thread(target=self.get_historical_rates_safe, args=(ccy,))
+            t = Thread(target=self.get_historical_rates_safe, args=(ccy, cache_dir))
             t.setDaemon(True)
             t.start()
         return result
@@ -98,7 +126,7 @@ class BitcoinAverage(ExchangeBase):
                 'MXN', 'NOK', 'NZD', 'PLN', 'RON', 'RUB', 'SEK', 'SGD', 'USD',
                 'ZAR']
 
-    def historical_rates(self, ccy):
+    def request_history(self, ccy):
         history = self.get_csv('apiv2.bitcoinaverage.com',
                                "/indices/global/history/BCH%s?period=alltime&format=csv" % ccy)
         return dict([(h['DateTime'][:10], h['Average'])
@@ -126,7 +154,7 @@ class BitcoinVenezuela(ExchangeBase):
     def history_ccys(self):
         return ['ARS', 'EUR', 'USD', 'VEF']
 
-    def historical_rates(self, ccy):
+    def request_history(self, ccy):
         return self.get_json('api.bitcoinvenezuela.com',
                              "/historical/index.php?coin=BTC")[ccy +'_BTC']
 
@@ -178,20 +206,6 @@ class BlockchainInfo(ExchangeBase):
         return dict([(r, Decimal(json[r]['15m'])) for r in json])
 
 
-class BTCChina(ExchangeBase):
-
-    def get_rates(self, ccy):
-        json = self.get_json('data.btcchina.com', '/data/ticker')
-        return {'CNY': Decimal(json['ticker']['last'])}
-
-
-class BTCParalelo(ExchangeBase):
-
-    def get_rates(self, ccy):
-        json = self.get_json('btcparalelo.com', '/api/price')
-        return {'VEF': Decimal(json['price'])}
-
-
 class Coinbase(ExchangeBase):
 
     def get_rates(self, ccy):
@@ -200,26 +214,26 @@ class Coinbase(ExchangeBase):
         return dict([(r[7:].upper(), Decimal(json[r]))
                      for r in json if r.startswith('bch_to_')])
 
-
 class CoinDesk(ExchangeBase):
 
-    def get_rates(self, ccy):
+    def get_currencies(self):
         dicts = self.get_json('api.coindesk.com',
                               '/v1/bpi/supported-currencies.json')
+        return [d['currency'] for d in dicts]
+
+    def get_rates(self, ccy):
         json = self.get_json('api.coindesk.com',
                              '/v1/bpi/currentprice/%s.json' % ccy)
-        ccys = [d['currency'] for d in dicts]
-        result = dict.fromkeys(ccys)
-        result[ccy] = Decimal(json['bpi'][ccy]['rate_float'])
+        result = {ccy: Decimal(json['bpi'][ccy]['rate_float'])}
         return result
 
     def history_starts(self):
-        return { 'USD': '2012-11-30' }
+        return { 'USD': '2012-11-30', 'EUR': '2013-09-01' }
 
     def history_ccys(self):
         return self.history_starts().keys()
 
-    def historical_rates(self, ccy):
+    def request_history(self, ccy):
         start = self.history_starts()[ccy]
         end = datetime.today().strftime('%Y-%m-%d')
         # Note ?currency and ?index don't work as documented.  Sigh.
@@ -227,13 +241,6 @@ class CoinDesk(ExchangeBase):
                  % (start, end))
         json = self.get_json('api.coindesk.com', query)
         return json['bpi']
-
-
-class Coinsecure(ExchangeBase):
-
-    def get_rates(self, ccy):
-        json = self.get_json('api.coinsecure.in', '/v0/noauth/newticker')
-        return {'INR': Decimal(json['lastprice'] / 100.0 )}
 
 
 class Foxbit(ExchangeBase):
@@ -280,40 +287,11 @@ class CoinFloor(ExchangeBase):
         return {'GBP': Decimal(json['last'])}
 
 
-class CEXIO(ExchangeBase):
-    # Cex.io supports GBP, USD, EUR, BTC
-    def get_rates(self, ccy):
-        json = self.get_json('cex.io', '/api/ticker/BCH/%s' % ccy)
-        return { ccy : Decimal(json['last'])}
-
-class BtcMarkets(ExchangeBase):
-    # BtcMarkets - Australian Exchange - AUD
-    def get_rates(self, ccy):
-        json = self.get_json('api.btcmarkets.net', '/market/BCH/%s/tick' % ccy)
-        return { ccy : Decimal(json['lastPrice'])}
-
 class MercadoBitcoin(ExchangeBase):
 
     def get_rates(self, ccy):
         json = self.get_json('api.bitvalor.com', '/v1/ticker.json')
         return {'BRL': Decimal(json['ticker_1h']['exchanges']['MBT']['last'])}
-
-
-class NegocieCoins(ExchangeBase):
-
-    def get_rates(self,ccy):
-        json = self.get_json('api.bitvalor.com', '/v1/ticker.json')
-        return {'BRL': Decimal(json['ticker_1h']['exchanges']['NEG']['last'])}
-
-    def history_ccys(self):
-        return ['BRL']
-
-
-class Unocoin(ExchangeBase):
-
-    def get_rates(self, ccy):
-        json = self.get_json('www.unocoin.com', 'trade?buy')
-        return {'INR': Decimal(json)}
 
 
 class WEX(ExchangeBase):
@@ -333,22 +311,6 @@ class WEX(ExchangeBase):
                 'LTC': Decimal(json_ltc['bch_ltc']['last']),
                 'ETH': Decimal(json_eth['bch_eth']['last']),
                 'DSH': Decimal(json_dsh['bch_dsh']['last'])}
-
-class Winkdex(ExchangeBase):
-
-    def get_rates(self, ccy):
-        json = self.get_json('winkdex.com', '/api/v0/price')
-        return {'USD': Decimal(json['price'] / 100.0)}
-
-    def history_ccys(self):
-        return ['USD']
-
-    def historical_rates(self, ccy):
-        json = self.get_json('winkdex.com',
-                             "/api/v0/series?start_time=1342915200")
-        history = json['series'][0]['results']
-        return dict([(h['timestamp'][:10], h['price'] / 100.0)
-                     for h in history])
 
 
 def dictinvert(d):
@@ -376,7 +338,9 @@ def get_exchanges_and_currencies():
         exchange = klass(None, None)
         try:
             d[name] = exchange.get_currencies()
+            print(name, "ok")
         except:
+            print(name, "error")
             continue
     with open(path, 'w') as f:
         f.write(json.dumps(d, indent=4, sort_keys=True))
@@ -407,7 +371,10 @@ class FxThread(ThreadJob):
         self.history_used_spot = False
         self.ccy_combo = None
         self.hist_checkbox = None
+        self.cache_dir = os.path.join(config.path, 'cache')
         self.set_exchange(self.config_exchange())
+        if not os.path.exists(self.cache_dir):
+            os.mkdir(self.cache_dir)
 
     def get_currencies(self, h):
         d = get_exchanges_by_ccy(h)
@@ -417,16 +384,20 @@ class FxThread(ThreadJob):
         d = get_exchanges_by_ccy(h)
         return d.get(ccy, [])
 
-    def ccy_amount_str(self, amount, commas):
-        prec = CCY_PRECISIONS.get(self.ccy, 2)
+    def ccy_amount_str(self, amount, commas,default_prec = 2):
+        prec = CCY_PRECISIONS.get(self.ccy, default_prec)
         fmt_str = "{:%s.%df}" % ("," if commas else "", max(0, prec))
-        return fmt_str.format(round(amount, prec))
+        try:
+            rounded_amount = round(amount, prec)
+        except decimal.InvalidOperation:
+            rounded_amount = amount
+        return fmt_str.format(rounded_amount)
 
     def run(self):
         # This runs from the plugins thread which catches exceptions
         if self.is_enabled():
             if self.timeout ==0 and self.show_history():
-                self.exchange.get_historical_rates(self.ccy)
+                self.exchange.get_historical_rates(self.ccy, self.cache_dir)
             if self.timeout <= time.time():
                 self.timeout = time.time() + 150
                 self.exchange.update(self.ccy)
@@ -474,12 +445,15 @@ class FxThread(ThreadJob):
         # A new exchange means new fx quotes, initially empty.  Force
         # a quote refresh
         self.timeout = 0
+        self.exchange.read_historical_rates(self.ccy, self.cache_dir)
 
     def on_quotes(self):
-        self.network.trigger_callback('on_quotes')
+        if self.network:
+            self.network.trigger_callback('on_quotes')
 
     def on_history(self):
-        self.network.trigger_callback('on_history')
+        if self.network:
+            self.network.trigger_callback('on_history')
 
     def exchange_rate(self):
         '''Returns None, or the exchange rate as a Decimal'''
@@ -493,15 +467,18 @@ class FxThread(ThreadJob):
 
     def get_fiat_status_text(self, btc_balance, base_unit, decimal_point):
         rate = self.exchange_rate()
+        default_prec = 2
+        if (base_unit == "cash"):
+            default_prec = 4
         return _("  (No FX rate available)") if rate is None else " 1 %s~%s %s" % (base_unit,
-            self.value_str(COIN / (10**(8 - decimal_point)), rate), self.ccy)
+            self.value_str(COIN / (10**(8 - decimal_point)), rate, default_prec ), self.ccy )
 
-    def value_str(self, satoshis, rate):
+    def value_str(self, satoshis, rate, default_prec = 2 ):
         if satoshis is None:  # Can happen with incomplete history
             return _("Unknown")
         if rate:
             value = Decimal(satoshis) / COIN * Decimal(rate)
-            return "%s" % (self.ccy_amount_str(value, True))
+            return "%s" % (self.ccy_amount_str(value, True, default_prec))
         return _("No data")
 
     def history_rate(self, d_t):
@@ -511,8 +488,18 @@ class FxThread(ThreadJob):
         if rate is None and (datetime.today().date() - d_t.date()).days <= 2:
             rate = self.exchange.quotes.get(self.ccy)
             self.history_used_spot = True
-        return rate
+        return Decimal(rate) if rate is not None else None
 
     def historical_value_str(self, satoshis, d_t):
         rate = self.history_rate(d_t)
         return self.value_str(satoshis, rate)
+
+    def historical_value(self, satoshis, d_t):
+        rate = self.history_rate(d_t)
+        if rate:
+            return Decimal(satoshis) / COIN * Decimal(rate)
+
+    def timestamp_rate(self, timestamp):
+        from electrum.util import timestamp_to_datetime
+        date = timestamp_to_datetime(timestamp)
+        return self.history_rate(date)

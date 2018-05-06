@@ -159,7 +159,7 @@ class ElectrumWindow(App):
         self._trigger_update_history()
 
     def _get_bu(self):
-        return self.electrum_config.get('base_unit', 'mBCH')
+        return self.electrum_config.get('base_unit', 'cash')
 
     def _set_bu(self, value):
         assert value in base_units.keys()
@@ -266,6 +266,7 @@ class ElectrumWindow(App):
 
         self.use_change = config.get('use_change', True)
         self.use_cashaddr = config.get('use_cashaddr', True)
+        Address.show_cashaddr(self.use_cashaddr)
         self.use_unconfirmed = not config.get('confirmed_only', False)
 
         # create triggers so as to minimize updation a max of 2 times a sec
@@ -644,7 +645,7 @@ class ElectrumWindow(App):
             if not self.wallet.up_to_date or server_height == 0:
                 status = _("Synchronizing...")
             elif server_lag > 1:
-                status = _("Server lagging (%d blocks)"%server_lag)
+                status = _("Server lagging ({} blocks)").format(server_lag)
             else:
                 c, u, x = self.wallet.get_balance()
                 text = self.format_amount(c+x+u)
@@ -862,7 +863,7 @@ class ElectrumWindow(App):
     def _delete_wallet(self, b):
         if b:
             basename = os.path.basename(self.wallet.storage.path)
-            self.protected(_("Enter your PIN code to confirm deletion of %s") % basename, self.__delete_wallet, ())
+            self.protected(_("Enter your PIN code to confirm deletion of {}").format(basename), self.__delete_wallet, ())
 
     def __delete_wallet(self, pw):
         wallet_path = self.get_wallet_path()
@@ -945,6 +946,10 @@ class ElectrumWindow(App):
             if not self.wallet.can_export():
                 return
             addr = Address.from_string(addr)
-            key = self.wallet.export_private_key(addr, password)
-            pk_label.data = key
+            try:
+                key = self.wallet.export_private_key(addr, password)
+                pk_label.data = key
+            except InvalidPassword:
+                self.show_error("Invalid PIN")
+                return
         self.protected(_("Enter your PIN code in order to decrypt your private key"), show_private_key, (addr, pk_label))

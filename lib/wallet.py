@@ -35,8 +35,9 @@ import time
 import json
 import copy
 import errno
-from functools import partial
 from collections import defaultdict
+from decimal import Decimal
+from functools import partial
 
 from .i18n import _
 from .util import NotEnoughFunds, ExcessiveFee, PrintError, UserCancelled, profiler, format_satoshis
@@ -201,8 +202,9 @@ class Abstract_Wallet(PrintError):
         # interface.is_up_to_date() returns true when all requests have been answered and processed
         # wallet.up_to_date is true when the wallet is synchronized (stronger requirement)
         self.up_to_date = False
-        self.lock = threading.Lock()
-        self.transaction_lock = threading.Lock()
+        # locks: if you need to take multiple ones, acquire them in the order they are defined here!
+        self.lock = threading.RLock()
+        self.transaction_lock = threading.RLock()
 
         self.check_history()
 
@@ -296,10 +298,12 @@ class Abstract_Wallet(PrintError):
     @profiler
     def check_history(self):
         save = False
-        my_addrs = [addr for addr in self._history.keys()
-                    if self.is_mine(addr)]
-        if len(my_addrs) != len(self._history):
+        my_addrs = [addr for addr in self._history if self.is_mine(addr)]
+
+        for addr in set(self._history) - set(my_addrs):
+            self._history.pop(addr)
             save = True
+
         for addr in my_addrs:
             hist = self._history[addr]
 
@@ -334,6 +338,9 @@ class Abstract_Wallet(PrintError):
 
     def synchronize(self):
         pass
+
+    def is_deterministic(self):
+        return self.keystore.is_deterministic()
 
     def set_up_to_date(self, up_to_date):
         with self.lock:
@@ -370,17 +377,20 @@ class Abstract_Wallet(PrintError):
         return address in self.get_addresses()
 
     def is_change(self, address):
-        if not self.is_mine(address):
-            return False
+        assert not isinstance(address, str)
         return address in self.change_addresses
 
     def get_address_index(self, address):
-        assert isinstance(address, Address)
-        if address in self.receiving_addresses:
+        try:
             return False, self.receiving_addresses.index(address)
-        if address in self.change_addresses:
+        except ValueError:
+            pass
+        try:
             return True, self.change_addresses.index(address)
-        raise Exception("Address not found", address)
+        except ValueError:
+            pass
+        assert not isinstance(address, str)
+        raise Exception("Address {} not found".format(address))
 
     def export_private_key(self, address, password):
         """ extended WIF format """
@@ -397,7 +407,8 @@ class Abstract_Wallet(PrintError):
     def add_unverified_tx(self, tx_hash, tx_height):
         if tx_height == 0 and tx_hash in self.verified_tx:
             self.verified_tx.pop(tx_hash)
-            self.verifier.merkle_roots.pop(tx_hash, None)
+            if self.verifier:
+                self.verifier.merkle_roots.pop(tx_hash, None)
 
         # tx will be verified only if height > 0
         if tx_hash not in self.verified_tx:
@@ -547,7 +558,7 @@ class Abstract_Wallet(PrintError):
                 height, conf, timestamp = self.get_tx_height(tx_hash)
                 if height > 0:
                     if conf:
-                        status = _("%d confirmations") % conf
+                        status = _("{} confirmations").format(conf)
                     else:
                         status = _('Not verified')
                 else:
@@ -635,8 +646,10 @@ class Abstract_Wallet(PrintError):
                     u -= v
         return c, u, x
 
-    def get_spendable_coins(self, domain, config):
+    def get_spendable_coins(self, domain, config, isInvoice = False):
         confirmed_only = config.get('confirmed_only', False)
+        if (isInvoice):
+            confirmed_only = True
         return self.get_utxos(domain, exclude_frozen=True, mature=True, confirmed_only=confirmed_only)
 
     def get_utxos(self, domain = None, exclude_frozen = False, mature = False, confirmed_only = False):
@@ -823,6 +836,50 @@ class Abstract_Wallet(PrintError):
             return []
 
         return h2
+
+    def export_history(self, domain=None, from_timestamp=None, to_timestamp=None, fx=None, show_addresses=False):
+        from .util import format_time, format_satoshis, timestamp_to_datetime
+        h = self.get_history(domain)
+        out = []
+        for tx_hash, height, conf, timestamp, value, balance in h:
+            if from_timestamp and timestamp < from_timestamp:
+                continue
+            if to_timestamp and timestamp >= to_timestamp:
+                continue
+            item = {
+                'txid':tx_hash,
+                'height':height,
+                'confirmations':conf,
+                'timestamp':timestamp,
+                'value': format_satoshis(value, True) if value is not None else '--',
+                'balance': format_satoshis(balance)
+            }
+            if item['height']>0:
+                date_str = format_time(timestamp) if timestamp is not None else _("unverified")
+            else:
+                date_str = _("unconfirmed")
+            item['date'] = date_str
+            item['label'] = self.get_label(tx_hash)
+            if show_addresses:
+                tx = self.transactions.get(tx_hash)
+                tx.deserialize()
+                input_addresses = []
+                output_addresses = []
+                for x in tx.inputs():
+                    if x['type'] == 'coinbase': continue
+                    addr = x.get('address')
+                    if addr == None: continue
+                    input_addresses.append(addr.to_ui_string())
+                for addr, v in tx.get_outputs():
+                    output_addresses.append(addr.to_ui_string())
+                item['input_addresses'] = input_addresses
+                item['output_addresses'] = output_addresses
+            if fx is not None:
+                date = timestamp_to_datetime(time.time() if conf <= 0 else timestamp)
+                item['fiat_value'] = fx.historical_value_str(value, date)
+                item['fiat_balance'] = fx.historical_value_str(balance, date)
+            out.append(item)
+        return out
 
     def get_label(self, tx_hash):
         label = self.labels.get(tx_hash, '')
@@ -1040,14 +1097,11 @@ class Abstract_Wallet(PrintError):
         return not self.is_watching_only() and hasattr(self.keystore, 'get_private_key')
 
     def is_used(self, address):
-        assert isinstance(address, Address)
-        c, u, x = self.get_addr_balance(address)
-        return c + u + x == 0 and self.get_address_history(address)
+        return self.get_address_history(address) and not self.is_empty(address)
 
     def is_empty(self, address):
         assert isinstance(address, Address)
-        c, u, x = self.get_addr_balance(address)
-        return c+u+x == 0
+        return any(self.get_addr_balance(address))
 
     def address_is_old(self, address, age_limit=2):
         age = -1
@@ -1655,9 +1709,6 @@ class Deterministic_Wallet(Abstract_Wallet):
     def has_seed(self):
         return self.keystore.has_seed()
 
-    def is_deterministic(self):
-        return self.keystore.is_deterministic()
-
     def get_receiving_addresses(self):
         return self.receiving_addresses
 
@@ -1712,14 +1763,15 @@ class Deterministic_Wallet(Abstract_Wallet):
 
     def create_new_address(self, for_change=False):
         assert type(for_change) is bool
-        addr_list = self.change_addresses if for_change else self.receiving_addresses
-        n = len(addr_list)
-        x = self.derive_pubkeys(for_change, n)
-        address = self.pubkeys_to_address(x)
-        addr_list.append(address)
-        self.save_addresses()
-        self.add_address(address)
-        return address
+        with self.lock:
+            addr_list = self.change_addresses if for_change else self.receiving_addresses
+            n = len(addr_list)
+            x = self.derive_pubkeys(for_change, n)
+            address = self.pubkeys_to_address(x)
+            addr_list.append(address)
+            self.save_addresses()
+            self.add_address(address)
+            return address
 
     def synchronize_sequence(self, for_change):
         limit = self.gap_limit_for_change if for_change else self.gap_limit
@@ -1735,16 +1787,8 @@ class Deterministic_Wallet(Abstract_Wallet):
 
     def synchronize(self):
         with self.lock:
-            if self.is_deterministic():
-                self.synchronize_sequence(False)
-                self.synchronize_sequence(True)
-            else:
-                if len(self.receiving_addresses) != len(self.keystore.keypairs):
-                    pubkeys = self.keystore.keypairs.keys()
-                    self.receiving_addresses = [self.pubkeys_to_address(i) for i in pubkeys]
-                    self.save_addresses()
-                    for addr in self.receiving_addresses:
-                        self.add_address(addr)
+            self.synchronize_sequence(False)
+            self.synchronize_sequence(True)
 
     def is_beyond_limit(self, address, is_change):
         if is_change:

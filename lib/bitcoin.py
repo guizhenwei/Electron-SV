@@ -286,40 +286,11 @@ def pubkey_to_address(txin_type, pubkey):
     else:
         raise NotImplementedError(txin_type)
 
-def redeem_script_to_address(txin_type, redeem_script):
-    if txin_type == 'p2sh':
-        return hash160_to_p2sh(hash_160(bfh(redeem_script)))
-    else:
-        raise NotImplementedError(txin_type)
-
-
 def script_to_address(script):
     from .transaction import get_address_from_output_script
     t, addr = get_address_from_output_script(bfh(script))
     assert t == TYPE_ADDRESS
     return addr
-
-def address_to_script(addr):
-    addrtype, hash_160 = b58_address_to_hash160(addr)
-    if addrtype == NetworkConstants.ADDRTYPE_P2PKH:
-        script = '76a9'                                      # op_dup, op_hash_160
-        script += push_script(bh2u(hash_160))
-        script += '88ac'                                     # op_equalverify, op_checksig
-    elif addrtype == NetworkConstants.ADDRTYPE_P2SH:
-        script = 'a9'                                        # op_hash_160
-        script += push_script(bh2u(hash_160))
-        script += '87'                                       # op_equal
-    else:
-        raise BaseException('unknown address type')
-    return script
-
-def address_to_scripthash(addr):
-    script = address_to_script(addr)
-    return script_to_scripthash(script)
-
-def script_to_scripthash(script):
-    h = sha256(bytes.fromhex(script))[0:32]
-    return bh2u(bytes(reversed(h)))
 
 def public_key_to_p2pk_script(pubkey):
     script = push_script(pubkey)

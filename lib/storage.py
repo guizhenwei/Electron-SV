@@ -193,6 +193,7 @@ class WalletStorage(PrintError):
             os.remove(self.path)
             os.rename(temp_path, self.path)
         os.chmod(self.path, mode)
+        self.raw = s
         self.print_error("saved", self.path)
         self.modified = False
 
@@ -265,6 +266,9 @@ class WalletStorage(PrintError):
         self.write()
 
     def convert_wallet_type(self):
+        if not self._is_upgrade_method_needed(0, 13):
+            return
+
         wallet_type = self.get('wallet_type')
         if wallet_type == 'btchip': wallet_type = 'ledger'
         if self.get('keystore') or self.get('x1/') or wallet_type=='imported':
@@ -457,6 +461,9 @@ class WalletStorage(PrintError):
                 self.put('wallet_type', 'imported_addr')
 
     def convert_imported(self):
+        if not self._is_upgrade_method_needed(0, 13):
+            return
+
         # '/x' is the internal ID for imported accounts
         d = self.get('accounts', {}).get('/x', {}).get('imported',{})
         if not d:
@@ -483,6 +490,9 @@ class WalletStorage(PrintError):
             raise BaseException('no addresses or privkeys')
 
     def convert_account(self):
+        if not self._is_upgrade_method_needed(0, 13):
+            return
+
         self.put('accounts', None)
 
     def _is_upgrade_method_needed(self, min_version, max_version):

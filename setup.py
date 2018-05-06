@@ -9,10 +9,16 @@ import platform
 import imp
 import argparse
 
+with open('contrib/requirements/requirements.txt') as f:
+    requirements = f.read().splitlines()
+
+with open('contrib/requirements/requirements-hw.txt') as f:
+    requirements_hw = f.read().splitlines()
+
 version = imp.load_source('version', 'lib/version.py')
 
-if sys.version_info[:3] < (3, 4, 0):
-    sys.exit("Error: Electron Cash requires Python version >= 3.4.0...")
+if sys.version_info[:3] < (3, 5, 0):
+    sys.exit("Error: Electron Cash requires Python version >= 3.5.0...")
 
 data_files = []
 
@@ -28,8 +34,13 @@ if platform.system() in ['Linux', 'FreeBSD', 'DragonFly']:
         else:
             usr_share = os.path.expanduser('~/.local/share')
     data_files += [
+        # Menu icon
+        (os.path.join(usr_share, 'icons/hicolor/128x128/apps/'), ['icons/electron-cash.png']),
+        (os.path.join(usr_share, 'pixmaps/'),                    ['icons/electron-cash.png']),
+        # Menu entry
         (os.path.join(usr_share, 'applications/'), ['electron-cash.desktop']),
-        (os.path.join(usr_share, 'pixmaps/'), ['icons/electron-cash.png'])
+        # App stream (store) metadata
+        (os.path.join(usr_share, 'metainfo/'), ['org.electroncash.ElectronCash.appdata.xml']),
     ]
 
 setup(
@@ -47,6 +58,9 @@ setup(
         'PySocks>=1.6.6',
         'pyqt5',
     ],
+    extras_require={
+        'hardware': requirements_hw,
+    },
     packages=[
         'electroncash',
         'electroncash_gui',

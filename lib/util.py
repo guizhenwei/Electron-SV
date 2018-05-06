@@ -38,7 +38,7 @@ def inv_dict(d):
     return {v: k for k, v in d.items()}
 
 
-base_units = {'BCH':8, 'mBCH':5, 'uBCH':2}
+base_units = {'BCH':8, 'mBCH':5, 'cash':2}
 fee_levels = [_('Within 25 blocks'), _('Within 10 blocks'), _('Within 5 blocks'), _('Within 2 blocks'), _('In the next block')]
 
 def normalize_version(v):
@@ -51,6 +51,19 @@ class ExcessiveFee(Exception): pass
 class InvalidPassword(Exception):
     def __str__(self):
         return _("Incorrect password")
+
+
+class FileImportFailed(Exception):
+    def __str__(self):
+        return _("Failed to import file.")
+
+
+class FileImportFailedEncrypted(FileImportFailed):
+    def __str__(self):
+        return (_('Failed to import file.') + ' ' +
+                _('Perhaps it is encrypted...') + '\n' +
+                _('Importing encrypted files is not supported.'))
+
 
 # Throw this exception to unwind the stack like when an error occurs.
 # However unlike other exceptions the user won't be informed.
@@ -71,7 +84,11 @@ class PrintError(object):
         return self.__class__.__name__
 
     def print_error(self, *msg):
+        # only prints with --verbose flag
         print_error("[%s]" % self.diagnostic_name(), *msg)
+
+    def print_stderr(self, *msg):
+        print_stderr("[%s]" % self.diagnostic_name(), *msg)
 
     def print_msg(self, *msg):
         print_msg("[%s]" % self.diagnostic_name(), *msg)
@@ -155,7 +172,7 @@ class DaemonThread(threading.Thread, PrintError):
             self.running = False
 
     def on_stop(self):
-        if 'ANDROID_DATA' in os.environ:
+        if 'ANDROID_DATA' in os.environ and 'ANDROID_NATIVE_UI' not in os.environ:
             import jnius
             jnius.detach()
             self.print_error("jnius detach")
@@ -230,17 +247,26 @@ def profiler(func):
 
 
 def android_ext_dir():
-    import jnius
-    env = jnius.autoclass('android.os.Environment')
-    return env.getExternalStorageDirectory().getPath()
+    if 'ANDROID_EXT_DIR' in os.environ:
+        return os.environ['ANDROID_EXT_DIR']
+    else:
+        import jnius
+        env = jnius.autoclass('android.os.Environment')
+        return env.getExternalStorageDirectory().getPath()
 
 def android_data_dir():
-    import jnius
-    PythonActivity = jnius.autoclass('org.kivy.android.PythonActivity')
-    return PythonActivity.mActivity.getFilesDir().getPath() + '/data'
+    if 'ANDROID_DATA_DIR' in os.environ:
+        return os.environ['ANDROID_DATA_DIR']
+    else:
+        import jnius
+        PythonActivity = jnius.autoclass('org.kivy.android.PythonActivity')
+        return PythonActivity.mActivity.getFilesDir().getPath() + '/data'
 
 def android_headers_dir():
-    d = android_ext_dir() + '/org.electron.electron'
+    if 'ANDROID_EXT_DIR' in os.environ:
+        d = android_ext_dir()
+    else:
+        d = android_ext_dir() + '/org.electron.electron'
     if not os.path.exists(d):
         os.mkdir(d)
     return d
@@ -565,3 +591,33 @@ class QueuePipe:
     def send_all(self, requests):
         for request in requests:
             self.send(request)
+
+
+def setup_thread_excepthook():
+    """
+    Workaround for `sys.excepthook` thread bug from:
+    http://bugs.python.org/issue1230540
+
+    Call once from the main thread before creating any threads.
+    """
+
+    init_original = threading.Thread.__init__
+
+    def init(self, *args, **kwargs):
+
+        init_original(self, *args, **kwargs)
+        run_original = self.run
+
+        def run_with_except_hook(*args2, **kwargs2):
+            try:
+                run_original(*args2, **kwargs2)
+            except Exception:
+                sys.excepthook(*sys.exc_info())
+
+        self.run = run_with_except_hook
+
+    threading.Thread.__init__ = init
+
+
+def versiontuple(v):
+    return tuple(map(int, (v.split("."))))

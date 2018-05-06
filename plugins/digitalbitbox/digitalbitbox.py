@@ -79,6 +79,13 @@ class DigitalBitbox_Client():
     def is_paired(self):
         return self.password is not None
 
+    def has_usable_connection_with_device(self):
+        try:
+            self.dbb_has_password()
+        except BaseException:
+            return False
+        return True
+
     def _get_xpub(self, bip32_path):
         if self.check_device_dialog():
             return self.hid_send_encrypt(b'{"xpub": "%s"}' % bip32_path.encode('utf8'))
@@ -413,7 +420,7 @@ class DigitalBitbox_KeyStore(Hardware_KeyStore):
 
 
     def decrypt_message(self, pubkey, message, password):
-        raise RuntimeError(_('Encryption and decryption are currently not supported for %s') % self.device)
+        raise RuntimeError(_('Encryption and decryption are currently not supported for {}').format(self.device))
 
 
     def sign_message(self, sequence, message, password):

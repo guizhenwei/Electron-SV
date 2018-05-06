@@ -28,7 +28,6 @@ import os
 #Should have 3D acceleration turn on, on VM.  Also guest additions CD image.
 #os.environ['KIVY_GL_BACKEND']='sdl2'
 
-
 import sys
 
 if sys.version_info < (3, 5):
@@ -94,7 +93,7 @@ if is_local or is_android:
     imp.load_module('electroncash_gui', *imp.find_module('gui'))
     imp.load_module('electroncash_plugins', *imp.find_module('plugins'))
 
-from electroncash import bitcoin
+from electroncash import bitcoin, util
 from electroncash import SimpleConfig, Network
 from electroncash.networks import NetworkConstants
 from electroncash.wallet import Wallet, ImportedPrivkeyWallet, ImportedAddressWallet
@@ -279,7 +278,8 @@ def run_offline_command(config, config_options):
     # arguments passed to function
     args = [config.get(x) for x in cmd.params]
     # decode json arguments
-    args = list(map(json_decode, args))
+    if cmdname not in ('setconfig',):
+        args = list(map(json_decode, args))
     # options
     kwargs = {}
     for x in cmd.options:
@@ -296,8 +296,10 @@ def init_plugins(config, gui_name):
     from electroncash.plugins import Plugins
     return Plugins(config, is_local or is_android, gui_name)
 
-if __name__ == '__main__':
 
+if __name__ == '__main__':
+    # The hook will only be used in the Qt GUI right now
+    util.setup_thread_excepthook()
     # on osx, delete Process Serial Number arg generated for apps launched in Finder
     sys.argv = list(filter(lambda x: not x.startswith('-psn'), sys.argv))
 
@@ -325,11 +327,17 @@ if __name__ == '__main__':
 
     # config is an object passed to the various constructors (wallet, interface, gui)
     if is_android:
-        config_options = {
-            'verbose': True,
-            'cmd': 'gui',
-            'gui': 'kivy',
-        }
+        if 'ANDROID_NATIVE_UI' in os.environ:
+            config_options = {
+                'verbose': True,
+                'cmd': 'daemon',
+            }
+        else:
+            config_options = {
+                'verbose': True,
+                'cmd': 'gui',
+                'gui': 'kivy',
+            }
     else:
         config_options = args.__dict__
         f = lambda key: config_options[key] is not None and key not in config_variables.get(args.cmd, {}).keys()
@@ -403,7 +411,11 @@ if __name__ == '__main__':
                     from electroncash import websockets
                     websockets.WebSocketServer(config, d.network).start()
                 if config.get('requests_dir'):
-                    web.check_www_dir(config.get('requests_dir'))
+                    path = os.path.join(config.get('requests_dir'), 'index.html')
+                    if not os.path.exists(path):
+                        print("Requests directory not configured.")
+                        print("You can configure it using https://github.com/spesmilo/electrum-merchant")
+                        sys.exit(1)
                 d.join()
                 sys.exit(0)
             else:
