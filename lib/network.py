@@ -307,9 +307,6 @@ class Network(util.DaemonThread):
         # Resend unanswered requests
         requests = self.unanswered_requests.values()
         self.unanswered_requests = {}
-        if self.interface.ping_required():
-            params = [PACKAGE_VERSION, PROTOCOL_VERSION]
-            self.queue_request('server.version', params, self.interface)
         for request in requests:
             message_id = self.queue_request(request[0], request[1])
             self.unanswered_requests[message_id] = request
@@ -555,8 +552,8 @@ class Network(util.DaemonThread):
             if error is None:
                 self.relay_fee = int(result * COIN)
                 self.print_error("relayfee", self.relay_fee)
-        elif method == 'blockchain.block.get_chunk':
-            self.on_get_chunk(interface, response)
+        elif method == 'blockchain.block.headers':
+            self.on_block_headers(interface, response)
         elif method == 'blockchain.block.get_header':
             self.on_get_header(interface, response)
 
@@ -690,7 +687,10 @@ class Network(util.DaemonThread):
         interface.mode = 'default'
         interface.request = None
         self.interfaces[server] = interface
-        self.queue_request('blockchain.headers.subscribe', [], interface)
+        # server.version should be the first message
+        params = [PACKAGE_VERSION, PROTOCOL_VERSION]
+        self.queue_request('server.version', params, interface)
+        self.queue_request('blockchain.headers.subscribe', [True], interface)
         if server == self.default_server:
             self.switch_to_interface(server)
         #self.notify('interfaces')
@@ -713,8 +713,7 @@ class Network(util.DaemonThread):
             if interface.has_timed_out():
                 self.connection_down(interface.server)
             elif interface.ping_required():
-                params = [PACKAGE_VERSION, PROTOCOL_VERSION]
-                self.queue_request('server.version', params, interface)
+                self.queue_request('server.ping', [], interface)
 
         now = time.time()
         # nodes
@@ -743,11 +742,13 @@ class Network(util.DaemonThread):
 
     def request_chunk(self, interface, idx):
         interface.print_error("requesting chunk %d" % idx)
-        self.queue_request('blockchain.block.get_chunk', [idx], interface)
+        height = idx * 2016
+        self.queue_request('blockchain.block.headers', [height, 2016],
+                           interface)
         interface.request = idx
         interface.req_time = time.time()
 
-    def on_get_chunk(self, interface, response):
+    def on_block_headers(self, interface, response):
         '''Handle receiving a chunk of block headers'''
         error = response.get('error')
         result = response.get('result')
@@ -756,10 +757,11 @@ class Network(util.DaemonThread):
             interface.print_error(error or 'bad response')
             return
         # Ignore unsolicited chunks
-        index = params[0]
-        if interface.request != index:
+        index = interface.request
+        if index * 2016 != params[0]:
             return
-        connect = interface.blockchain.connect_chunk(index, result)
+        hexdata = result['hex']
+        connect = interface.blockchain.connect_chunk(index, hexdata)
         # If not finished, get the next chunk
         if not connect:
             self.connection_down(interface.server)
@@ -964,10 +966,9 @@ class Network(util.DaemonThread):
         self.stop_network()
         self.on_stop()
 
-    def on_notify_header(self, interface, header):
-        height = header.get('block_height')
-        if not height:
-            return
+    def on_notify_header(self, interface, header_dict):
+        header_hex, height = header_dict['hex'], header_dict['height']
+        header = blockchain.deserialize_header(bfh(header_hex), height)
         interface.tip_header = header
         interface.tip = height
         if interface.mode != 'default':
