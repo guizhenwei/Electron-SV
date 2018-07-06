@@ -4,6 +4,7 @@ import time
 import os
 import stat
 
+from . import util
 from copy import deepcopy
 from .util import user_dir, make_dir, print_error, PrintError
 
@@ -211,6 +212,7 @@ class SimpleConfig(PrintError):
             return path
 
         # default path
+        util.assert_datadir_available(self.path)
         dirpath = os.path.join(self.path, "wallets")
         make_dir(dirpath)
 
@@ -285,8 +287,17 @@ class SimpleConfig(PrintError):
     def has_fee_estimates(self):
         return len(self.fee_estimates)==4
 
-    def fee_per_kb(self):
-        return self.get('fee_per_kb', self.max_fee_rate()/2)
+    def custom_fee_rate(self):
+        f = self.get('customfee')
+        return f
+
+    def fee_per_kb(self): 
+       retval=self.get('customfee')
+       if (retval is None):
+           retval=self.get('fee_per_kb')                
+       if (retval is None):
+           retval=1000  # New wallet
+       return retval
 
     def estimate_fee(self, size):
         return int(self.fee_per_kb() * size / 1000.)

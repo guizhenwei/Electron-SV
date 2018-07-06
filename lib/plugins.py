@@ -120,6 +120,10 @@ class Plugins(DaemonThread):
 
     def load_external_plugins(self):
         external_plugin_dir = self.get_external_plugin_dir()
+        # Unit tests, environment does not lead to finding a user dir, there will be none to load anyway.
+        if external_plugin_dir is None:
+            return
+
         for file_name in os.listdir(external_plugin_dir):
             plugin_file_path = os.path.join(external_plugin_dir, file_name)
             leading_name, ext = os.path.splitext(file_name)
@@ -276,6 +280,9 @@ class Plugins(DaemonThread):
         # It's possible the plugins are being stored in a local directory
         # and the rest of the data is being stored in the non-local directory.
         local_user_dir = user_dir(prefer_local=True)
+        # Environment does not have a user directory (will be unit tests where there are no external plugins).
+        if local_user_dir is None:
+            return None
         make_dir(local_user_dir)
         external_plugin_dir = os.path.join(local_user_dir, "external_plugins")
         make_dir(external_plugin_dir)
@@ -327,7 +334,7 @@ class Plugins(DaemonThread):
                             # XX 00 - utf-16-le
                             return 'utf-16-le'
                     # default
-                    return 'utf-8'            
+                    return 'utf-8'
                 metadata_text = metadata_text.decode(detect_encoding(metadata_text), 'surrogatepass')
         # END
 
@@ -602,6 +609,8 @@ class DeviceMgr(ThreadJob, PrintError):
         # What we recognise.  Each entry is a (vendor_id, product_id)
         # pair.
         self.recognised_hardware = set()
+        # Custom enumerate functions for devices we don't know about.
+        self.enumerate_func = set()
         # For synchronization
         self.lock = threading.RLock()
         self.hid_lock = threading.RLock()
@@ -623,6 +632,9 @@ class DeviceMgr(ThreadJob, PrintError):
     def register_devices(self, device_pairs):
         for pair in device_pairs:
             self.recognised_hardware.add(pair)
+
+    def register_enumerate_func(self, func):
+        self.enumerate_func.add(func)
 
     def create_client(self, device, handler, plugin):
         # Get from cache first
@@ -737,7 +749,7 @@ class DeviceMgr(ThreadJob, PrintError):
         # The user input has wrong PIN or passphrase, or cancelled input,
         # or it is not pairable
         raise DeviceUnpairableError(
-            _('Electrum cannot pair with your {}.\n\n'
+            _('Electron Cash cannot pair with your {}.\n\n'
               'Before you request bitcoins to be sent to addresses in this '
               'wallet, ensure you can pair with your device, or that you have '
               'its seed (and passphrase, if any).  Otherwise all bitcoins you '
@@ -790,13 +802,12 @@ class DeviceMgr(ThreadJob, PrintError):
         handler.win.wallet.save_keystore()
         return info
 
-    def scan_devices(self):
-        # All currently supported hardware libraries use hid, so we
-        # assume it here.  This can be easily abstracted if necessary.
-        # Note this import must be local so those without hardware
-        # wallet libraries are not affected.
-        import hid
-        self.print_error("scanning devices...")
+    def _scan_devices_with_hid(self):
+        try:
+            import hid
+        except ImportError:
+            return []
+
         with self.hid_lock:
             hid_list = hid.enumerate(0, 0)
         # First see what's connected that we know about
@@ -813,8 +824,25 @@ class DeviceMgr(ThreadJob, PrintError):
                 id_ += str(interface_number) + str(usage_page)
                 devices.append(Device(d['path'], interface_number,
                                       id_, product_key, usage_page))
+        return devices
 
-        # Now find out what was disconnected
+    def scan_devices(self):
+        self.print_error("scanning devices...")
+
+        # First see what's connected that we know about
+        devices = self._scan_devices_with_hid()
+
+        # Let plugin handlers enumerate devices we don't know about
+        for f in self.enumerate_func:
+            try:
+                new_devices = f()
+            except BaseException as e:
+                self.print_error('custom device enum failed. func {}, error {}'
+                                 .format(str(f), str(e)))
+            else:
+                devices.extend(new_devices)
+
+        # find out what was disconnected
         pairs = [(dev.path, dev.id_) for dev in devices]
         disconnected_ids = []
         with self.lock:

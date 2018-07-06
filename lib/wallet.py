@@ -458,15 +458,14 @@ class Abstract_Wallet(PrintError):
     def get_txpos(self, tx_hash):
         "return position, even if the tx is unverified"
         with self.lock:
-            x = self.verified_tx.get(tx_hash)
-            y = self.unverified_tx.get(tx_hash)
-            if x:
-                height, timestamp, pos = x
+            if tx_hash in self.verified_tx:
+                height, timestamp, pos = self.verified_tx[tx_hash]
                 return height, pos
-            elif y > 0:
-                return y, 0
+            elif tx_hash in self.unverified_tx:
+                height = self.unverified_tx[tx_hash]
+                return (height, 0) if height > 0 else ((1e9 - height), 0)
             else:
-                return 1e12 - y, 0
+                return (1e9+1, 0)
 
     def is_found(self):
         return any(value for value in self._history.values())
@@ -851,7 +850,7 @@ class Abstract_Wallet(PrintError):
                 'height':height,
                 'confirmations':conf,
                 'timestamp':timestamp,
-                'value': format_satoshis(value, True) if value is not None else '--',
+                'value': format_satoshis(value, is_diff=True) if value is not None else '--',
                 'balance': format_satoshis(balance)
             }
             if item['height']>0:
@@ -1002,7 +1001,10 @@ class Abstract_Wallet(PrintError):
         # Sort the inputs and outputs deterministically
         tx.BIP_LI01_sort()
         # Timelock tx to current height.
-        tx.locktime = self.get_local_height()
+        locktime = self.get_local_height()
+        if locktime == -1: # We have no local height data (no headers synced).
+            locktime = 0
+        tx.locktime = locktime
         run_hook('make_unsigned_transaction', self, tx)
         return tx
 
@@ -1185,10 +1187,11 @@ class Abstract_Wallet(PrintError):
                     txin['prev_tx'] = inputtx   # may be needed by hardware wallets
 
     def add_hw_info(self, tx):
-        # add previous tx for hw wallets, if not already there
-        for txin in tx.inputs():
-            if 'prev_tx' not in txin:
-                txin['prev_tx'] = self.get_input_tx(txin['prevout_hash'])
+        # add previous tx for hw wallets, if needed and not already there
+        if any([(isinstance(k, Hardware_KeyStore) and k.can_sign(tx) and k.needs_prevtx()) for k in self.get_keystores()]):
+            for txin in tx.inputs():
+                if 'prev_tx' not in txin:
+                    txin['prev_tx'] = self.get_input_tx(txin['prevout_hash'])
         # add output info for hw wallets
         info = {}
         xpubs = self.get_master_public_keys()
@@ -1989,4 +1992,4 @@ class Wallet(object):
             return Multisig_Wallet
         if wallet_type in wallet_constructors:
             return wallet_constructors[wallet_type]
-        raise RuntimeError("Unknown wallet type: " + wallet_type)
+        raise RuntimeError("Unknown wallet type: " + str(wallet_type))

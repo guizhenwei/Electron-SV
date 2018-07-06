@@ -104,6 +104,9 @@ class TcpConnection(threading.Thread, util.PrintError):
         except socket.gaierror:
             self.print_error("cannot resolve hostname")
             return
+        except UnicodeDecodeError:
+            self.print_error("hostname cannot be decoded with 'idna' codec")
+            return
         e = None
         for res in l:
             try:
@@ -172,8 +175,11 @@ class TcpConnection(threading.Thread, util.PrintError):
                 # workaround android bug
                 cert = re.sub("([^\n])-----END CERTIFICATE-----","\\1\n-----END CERTIFICATE-----",cert)
                 temporary_path = cert_path + '.temp'
+                util.assert_datadir_available(self.config_path)
                 with open(temporary_path,"w") as f:
                     f.write(cert)
+                    f.flush()
+                    os.fsync(f.fileno())
             else:
                 is_new = False
 
@@ -199,6 +205,7 @@ class TcpConnection(threading.Thread, util.PrintError):
                         os.unlink(rej)
                     os.rename(temporary_path, rej)
                 else:
+                    util.assert_datadir_available(self.config_path)
                     with open(cert_path) as f:
                         cert = f.read()
                     try:
