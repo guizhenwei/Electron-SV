@@ -12,7 +12,7 @@ original_dir = os.getcwd()
 os.chdir(os.path.dirname(os.path.realpath(__file__)))
 os.chdir('..')
 
-code_directories = 'gui plugins lib'
+code_directories = 'gui plugins lib ios/ElectronCash/electroncash_gui/ios_native'
 cmd = "find {} -type f -name '*.py' -o -name '*.kv'".format(code_directories)
 
 files = subprocess.check_output(cmd, shell=True)
@@ -31,8 +31,8 @@ os.system(cmd)
 
 os.chdir('lib')
 
-crowdin_identifier = 'electrum'
-crowdin_file_name = 'files[electrum-client/messages.pot]'
+crowdin_identifier = 'electron-cash'
+crowdin_file_name = 'files[electron-cash-client/messages.pot]'
 locale_file_name = 'locale/messages.pot'
 crowdin_api_key = None
 
@@ -59,21 +59,18 @@ if crowdin_api_key:
 
 if len(sys.argv) < 2:
     # Download & unzip
-    print('Download translations')
-    s = requests.request('GET', 'https://crowdin.com/download/project/' + crowdin_identifier + '.zip').content
+    s = requests.request('GET', 'https://crowdin.com/backend/download/project/' + crowdin_identifier + '.zip').content
     zfobj = zipfile.ZipFile(io.BytesIO(s))
 else:
     zfobj = zipfile.ZipFile(os.path.join(os.path.relpath(original_dir, os.getcwd()), sys.argv[1]))
 
 print('Unzip translations')
 for name in zfobj.namelist():
-    if not name.startswith('electrum-client/locale'):
-        continue
     if name.endswith('/'):
-        if not os.path.exists(name[16:]):
-            os.mkdir(name[16:])
+        if not os.path.exists(name):
+            os.mkdir(name)
     else:
-        with open(name[16:], 'wb') as output:
+        with open(name, 'wb') as output:
             output.write(zfobj.read(name))
 
 # Convert .po to .mo
@@ -82,9 +79,9 @@ for lang in os.listdir('locale'):
     if lang.startswith('messages'):
         continue
     # Check LC_MESSAGES folder
-    mo_dir = 'locale/%s/LC_MESSAGES' % lang
-    if not os.path.exists(mo_dir):
-        os.mkdir(mo_dir)
-    cmd = 'msgfmt --output-file="%s/electron-cash.mo" "locale/%s/electrum.po"' % (mo_dir,lang)
+    msg_dir = 'locale/{}/LC_MESSAGES'.format(lang)
+    if not os.path.exists(msg_dir):
+        os.mkdir(msg_dir)
+    cmd = 'msgfmt --output-file="{0}/electron-cash.mo" "{0}/electron-cash.po"'.format(msg_dir)
     print('Installing', lang)
     os.system(cmd)

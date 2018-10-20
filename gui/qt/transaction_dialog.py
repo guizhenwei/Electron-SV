@@ -93,8 +93,6 @@ class TxDialog(QDialog, MessageBoxMixin):
 
         self.add_io(vbox)
 
-        vbox.addStretch(1)
-
         self.sign_button = b = QPushButton(_("Sign"))
         b.clicked.connect(self.sign)
 
@@ -128,6 +126,18 @@ class TxDialog(QDialog, MessageBoxMixin):
         vbox.addLayout(hbox)
         self.update()
 
+        # connect slots so we update in realtime as blocks come in, etc
+        parent.history_updated_signal.connect(self.update_tx_if_in_wallet)
+        parent.network_signal.connect(self.got_verified_tx)
+
+    def got_verified_tx(self, event, args):
+        if event == 'verified' and args[0] == self.tx.txid():
+            self.update()
+
+    def update_tx_if_in_wallet(self):
+        if self.tx.txid() in self.wallet.transactions:
+            self.update()
+
     def do_broadcast(self):
         self.main_window.push_top_level_window(self)
         try:
@@ -143,7 +153,14 @@ class TxDialog(QDialog, MessageBoxMixin):
             event.ignore()
         else:
             event.accept()
-            dialogs.remove(self)
+            try:
+                dialogs.remove(self)
+            except ValueError:  # wasn't in list
+                pass
+
+    def reject(self):
+        # Override escape-key to close normally (and invoke closeEvent)
+        self.close()
 
     def show_qr(self):
         text = bfh(str(self.tx))
@@ -188,6 +205,11 @@ class TxDialog(QDialog, MessageBoxMixin):
             (self.wallet.can_sign(self.tx) or bool(self.main_window.tx_external_keypairs))
         self.sign_button.setEnabled(can_sign)
         self.tx_hash_e.setText(tx_hash or _('Unknown'))
+        if fee is None:
+            try:
+                fee = self.tx.get_fee() # Try and compute fee. We don't always have 'value' in all the inputs though. :/
+            except KeyError: # Value key missing from an input
+                pass
         if desc is None:
             self.tx_desc.hide()
         else:
@@ -213,8 +235,11 @@ class TxDialog(QDialog, MessageBoxMixin):
             amount_str = _("Amount sent:") + ' %s'% format_amount(-amount) + ' ' + base_unit
         size_str = _("Size:") + ' %d bytes'% size
         fee_str = _("Fee") + ': %s'% (format_amount(fee) + ' ' + base_unit if fee is not None else _('unknown'))
+        dusty_fee = self.tx.ephemeral.get('dust_to_fee', 0)
         if fee is not None:
             fee_str += '  ( %s ) '%  self.main_window.format_fee_rate(fee/size*1000)
+            if dusty_fee:
+                fee_str += ' <font color=#999999>' + (_("( %s in dust was added to fee )") % format_amount(dusty_fee)) + '</font>'
         self.amount_label.setText(amount_str)
         self.fee_label.setText(fee_str)
         self.size_label.setText(size_str)
@@ -229,14 +254,12 @@ class TxDialog(QDialog, MessageBoxMixin):
         i_text = QTextEdit()
         i_text.setFont(QFont(MONOSPACE_FONT))
         i_text.setReadOnly(True)
-        i_text.setMaximumHeight(100)
 
         vbox.addWidget(i_text)
         vbox.addWidget(QLabel(_("Outputs") + ' (%d)'%len(self.tx.outputs())))
         o_text = QTextEdit()
         o_text.setFont(QFont(MONOSPACE_FONT))
         o_text.setReadOnly(True)
-        o_text.setMaximumHeight(100)
         vbox.addWidget(o_text)
         self.main_window.cashaddr_toggled_signal.connect(
             partial(self.update_io, i_text, o_text))
@@ -284,8 +307,14 @@ class TxDialog(QDialog, MessageBoxMixin):
         o_text.clear()
         cursor = o_text.textCursor()
         for addr, v in self.tx.get_outputs():
-            cursor.insertText(addr.to_ui_string(), text_format(addr))
+            addrstr = addr.to_ui_string()
+            cursor.insertText(addrstr, text_format(addr))
             if v is not None:
-                cursor.insertText('\t', ext)
+                if len(addrstr) > 42: # for long outputs, make a linebreak.
+                    cursor.insertBlock()
+                    addrstr = '\u21b3'
+                    cursor.insertText(addrstr, ext)
+                # insert enough spaces until column 43, to line up amounts
+                cursor.insertText(' '*(43 - len(addrstr)), ext)
                 cursor.insertText(format_amount(v), ext)
             cursor.insertBlock()

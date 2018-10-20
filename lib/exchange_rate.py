@@ -66,7 +66,7 @@ class ExchangeBase(PrintError):
         if os.path.exists(filename):
             timestamp = os.stat(filename).st_mtime
             try:
-                with open(filename, 'r') as f:
+                with open(filename, 'r', encoding='utf-8') as f:
                     h = json.loads(f.read())
             except:
                 h = None
@@ -90,7 +90,7 @@ class ExchangeBase(PrintError):
                 self.print_error("failed fx history:", e)
                 return
             filename = os.path.join(cache_dir, self.name() + '_' + ccy)
-            with open(filename, 'w') as f:
+            with open(filename, 'w', encoding='utf-8') as f:
                 f.write(json.dumps(h))
         self.history[ccy] = h
         self.on_history()
@@ -211,6 +211,49 @@ class WEX(ExchangeBase):
                 'DSH': Decimal(json_dsh['bch_dsh']['last'])}
 
 
+class CoinCap(ExchangeBase):
+
+    def get_rates(self, ccy):
+        json = self.get_json('api.coincap.io', '/v2/rates/bitcoin-cash/')
+        return {'USD': Decimal(json['data']['rateUsd'])}
+
+    def history_ccys(self):
+        return ['USD']
+
+    def request_history(self, ccy):
+        from datetime import datetime as dt
+        # Currently 2000 days is the maximum in 1 API call which needs to be fixed
+        # sometime before the year 2023...
+        history = self.get_json('api.coincap.io',
+                               "/v2/assets/bitcoin-cash/history?interval=d1&limit=2000")
+        return dict([(dt.utcfromtimestamp(h['time']/1000).strftime('%Y-%m-%d'),
+                        h['priceUsd'])
+                     for h in history['data']])
+
+
+class CoinGecko(ExchangeBase):
+
+    def get_rates(self, ccy):
+        json = self.get_json('api.coingecko.com', '/api/v3/coins/bitcoin-cash?localization=False&sparkline=false')
+        prices = json["market_data"]["current_price"]
+        return dict([(a[0].upper(),Decimal(a[1])) for a in prices.items()])
+
+    def history_ccys(self):
+        return ['AED', 'ARS', 'AUD', 'BTD', 'BHD', 'BMD', 'BRL', 'BTC',
+                'CAD', 'CHF', 'CLP', 'CNY', 'CZK', 'DKK', 'ETH', 'EUR',
+                'GBP', 'HKD', 'HUF', 'IDR', 'ILS', 'INR', 'JPY', 'KRW',
+                'KWD', 'LKR', 'LTC', 'MMK', 'MXH', 'MYR', 'NOK', 'NZD',
+                'PHP', 'PKR', 'PLN', 'RUB', 'SAR', 'SEK', 'SGD', 'THB',
+                'TRY', 'TWD', 'USD', 'VEF', 'XAG', 'XAU', 'XDR', 'ZAR']
+
+    def request_history(self, ccy):
+        history = self.get_json('api.coingecko.com', '/api/v3/coins/bitcoin-cash/market_chart?vs_currency=%s&days=max' % ccy)
+
+        from datetime import datetime as dt
+        return dict([(dt.utcfromtimestamp(h[0]/1000).strftime('%Y-%m-%d'), h[1])
+                     for h in history['prices']])
+
+
 def dictinvert(d):
     inv = {}
     for k, vlist in d.items():
@@ -223,7 +266,7 @@ def get_exchanges_and_currencies():
     import os, json
     path = os.path.join(os.path.dirname(__file__), 'currencies.json')
     try:
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             return json.loads(f.read())
     except:
         pass
@@ -240,7 +283,7 @@ def get_exchanges_and_currencies():
         except:
             print(name, "error")
             continue
-    with open(path, 'w') as f:
+    with open(path, 'w', encoding='utf-8') as f:
         f.write(json.dumps(d, indent=4, sort_keys=True))
     return d
 

@@ -166,27 +166,24 @@ def short_hex(bytes):
 
 def script_GetOp(_bytes):
     i = 0
-    while i < len(_bytes):
+    blen = len(_bytes)
+    while i < blen:
         vch = None
         opcode = _bytes[i]
         i += 1
-        if opcode >= opcodes.OP_SINGLEBYTE_END:
-            opcode <<= 8
-            opcode |= _bytes[i]
-            i += 1
 
         if opcode <= opcodes.OP_PUSHDATA4:
             nSize = opcode
             if opcode == opcodes.OP_PUSHDATA1:
-                nSize = _bytes[i]
+                nSize = _bytes[i] if i < blen else 0
                 i += 1
             elif opcode == opcodes.OP_PUSHDATA2:
-                (nSize,) = struct.unpack_from('<H', _bytes, i)
+                (nSize,) = struct.unpack_from('<H', _bytes, i) if i+2 <= blen else (0,) # tolerate truncated script
                 i += 2
             elif opcode == opcodes.OP_PUSHDATA4:
-                (nSize,) = struct.unpack_from('<I', _bytes, i)
+                (nSize,) = struct.unpack_from('<I', _bytes, i) if i+4 <= blen else (0,)
                 i += 4
-            vch = _bytes[i:i + nSize]
+            vch = _bytes[i:i + nSize] # array slicing here never throws exception even if truncated script
             i += nSize
 
         yield opcode, vch, i
@@ -416,6 +413,12 @@ class Transaction:
         self._outputs = None
         self.locktime = 0
         self.version = 1
+        
+        # Ephemeral meta-data used internally to keep track of interesting things.
+        # This is currently written-to by coinchooser to tell UI code about 'dust_to_fee', which
+        # is change that's too small to go to change outputs (below dust threshold) and needed
+        # to go to the fee. Values in this dict are advisory only and may or may not always be there!
+        self.ephemeral = dict()
 
     def update(self, raw):
         self.raw = raw
@@ -468,7 +471,6 @@ class Transaction:
                         j = pubkeys.index(pubkey)
                         print_error("adding sig", i, j, pubkey, sig)
                         self._inputs[i]['signatures'][j] = sig
-                        #self._inputs[i]['x_pubkeys'][j] = pubkey
                         break
         # redo raw
         self.raw = self.serialize()
@@ -734,7 +736,6 @@ class Transaction:
                     sig = private_key.sign_digest_deterministic(pre_hash, hashfunc=hashlib.sha256, sigencode = ecdsa.util.sigencode_der)
                     assert public_key.verify_digest(sig, pre_hash, sigdecode = ecdsa.util.sigdecode_der)
                     txin['signatures'][j] = bh2u(sig) + int_to_hex(self.nHashType() & 255, 1)
-                    txin['x_pubkeys'][j] = pubkey
                     txin['pubkeys'][j] = pubkey # needed for fd keys
                     self._inputs[i] = txin
         print_error("is_complete", self.is_complete())

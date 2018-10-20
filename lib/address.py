@@ -41,6 +41,9 @@ hex_to_bytes = bytes.fromhex
 class AddressError(Exception):
     '''Exception used for Address errors.'''
 
+class ScriptError(Exception):
+    '''Exception used for Script errors.'''
+
 
 OpCodes = Enumeration("OpCodes", [
     ("OP_0", 0), ("OP_PUSHDATA1",76), "OP_PUSHDATA2", "OP_PUSHDATA4", "OP_1NEGATE", "OP_RESERVED",
@@ -58,7 +61,9 @@ OpCodes = Enumeration("OpCodes", [
     "OP_WITHIN", "OP_RIPEMD160", "OP_SHA1", "OP_SHA256", "OP_HASH160",
     "OP_HASH256", "OP_CODESEPARATOR", "OP_CHECKSIG", "OP_CHECKSIGVERIFY", "OP_CHECKMULTISIG",
     "OP_CHECKMULTISIGVERIFY",
-    ("OP_SINGLEBYTE_END", 0xF0),
+    ("OP_NOP1", 0xB0),
+    "OP_CHECKLOCKTIMEVERIFY", "OP_CHECKSEQUENCEVERIFY",
+    "OP_NOP4", "OP_NOP5", "OP_NOP6", "OP_NOP7", "OP_NOP8", "OP_NOP9", "OP_NOP10",
 ])
 
 
@@ -240,15 +245,49 @@ class ScriptOutput(namedtuple("ScriptAddressTuple", "script")):
                 script.extend(Script.push_data(binascii.unhexlify(word)))
         return ScriptOutput(bytes(script))
 
-    def to_ui_string(self):
-        '''Convert to a hexadecimal string.'''
-        return self.script.hex()
+    def to_ui_string(self,):
+        '''Convert to user-readable OP-codes (plus pushdata as text if possible)
+        eg OP_RETURN (12) "Hello there!"
+        '''
+        try:
+            ops = Script.get_ops(self.script)
+        except ScriptError:
+            # Truncated script -- so just default to hex string.
+            return self.script.hex()
+        parts = []
+        for op in ops:
+            def lookup(x):
+                return OpCodes.reverseLookup.get(x, ('('+str(x)+')'))
+            if isinstance(op, tuple):
+                op, data = op
+                if data is None:
+                    data = b''
+
+                # Attempt to make a friendly string, or fail to hex
+                try:
+                    astext = data.decode('utf8')
+
+                    friendlystring = repr(astext)
+
+                    # if too many escaped characters, it's too ugly!
+                    if friendlystring.count('\\')*3 > len(astext):
+                        friendlystring = None
+                except:
+                    friendlystring = None
+
+                if not friendlystring:
+                    friendlystring = data.hex()
+
+                parts.append(lookup(op) + " " + friendlystring)
+            else: # isinstance(op, int):
+                parts.append(lookup(op))
+        return ', '.join(parts)
 
     def to_script(self):
         return self.script
 
     def __str__(self):
-        return self.to_ui_string()
+        return self.to_ui_string(True)
 
     def __repr__(self):
         return '<ScriptOutput {}>'.format(self.__str__())
@@ -293,17 +332,24 @@ class Address(namedtuple("AddressTuple", "hash160 kind")):
                                .format(addr_prefix))
         if kind == cashaddr.PUBKEY_TYPE:
             return cls(addr_hash, cls.ADDR_P2PKH)
-        else:
-            assert kind == cashaddr.SCRIPT_TYPE
+        elif kind == cashaddr.SCRIPT_TYPE:
             return cls(addr_hash, cls.ADDR_P2SH)
+        else:
+            raise AddressError('address has unexpected kind {}'.format(kind))
 
     @classmethod
     def from_string(cls, string):
         '''Construct from an address string.'''
         if len(string) > 35:
-            return cls.from_cashaddr_string(string)
+            try:
+                return cls.from_cashaddr_string(string)
+            except ValueError as e:
+                raise AddressError(str(e))
 
-        raw = Base58.decode_check(string)
+        try:
+            raw = Base58.decode_check(string)
+        except Base58Error as e:
+            raise AddressError(str(e))
 
         # Require version byte(s) plus hash160.
         if len(raw) != 21:

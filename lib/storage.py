@@ -29,7 +29,7 @@ import json
 import copy
 import re
 import stat
-import pbkdf2, hmac, hashlib
+import hmac, hashlib
 import base64
 import zlib
 
@@ -72,7 +72,7 @@ class WalletStorage(PrintError):
         self.pubkey = None
         if self.file_exists():
             try:
-                with open(self.path, "r") as f:
+                with open(self.path, "r", encoding='utf-8') as f:
                     self.raw = f.read()
             except UnicodeDecodeError as e:
                 raise IOError("Error reading file: "+ str(e))
@@ -122,7 +122,7 @@ class WalletStorage(PrintError):
         return self.path and os.path.exists(self.path)
 
     def get_key(self, password):
-        secret = pbkdf2.PBKDF2(password, '', iterations = 1024, macmodule = hmac, digestmodule = hashlib.sha512).read(64)
+        secret = hashlib.pbkdf2_hmac('sha512', password.encode('utf-8'), b'', iterations=1024)
         ec_key = bitcoin.EC_KEY(secret)
         return ec_key
 
@@ -185,7 +185,7 @@ class WalletStorage(PrintError):
             s = s.decode('utf8')
 
         temp_path = "%s.tmp.%s" % (self.path, os.getpid())
-        with open(temp_path, "w") as f:
+        with open(temp_path, "w", encoding='utf-8') as f:
             f.write(s)
             f.flush()
             os.fsync(f.fileno())
@@ -539,7 +539,7 @@ class WalletStorage(PrintError):
             # version 1.9.8 created v6 wallets when an incorrect seed was entered in the restore dialog
             msg += '\n\nThis file was created because of a bug in version 1.9.8.'
             if self.get('master_public_keys') is None and self.get('master_private_keys') is None and self.get('imported_keys') is None:
-                # pbkdf2 was not included with the binaries, and wallet creation aborted.
+                # pbkdf2 (at that time an additional dependency) was not included with the binaries, and wallet creation aborted.
                 msg += "\nIt does not contain any keys, and can safely be removed."
             else:
                 # creation was complete if electrum was run from source

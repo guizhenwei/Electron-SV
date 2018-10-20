@@ -41,8 +41,8 @@ from .exception_window import Exception_Hook
 from PyQt5.QtWidgets import *
 
 from electroncash import keystore
-from electroncash.address import Address
-from electroncash.bitcoin import COIN, TYPE_ADDRESS
+from electroncash.address import Address, ScriptOutput
+from electroncash.bitcoin import COIN, TYPE_ADDRESS, TYPE_SCRIPT
 from electroncash.networks import NetworkConstants
 from electroncash.plugins import run_hook
 from electroncash.i18n import _
@@ -60,14 +60,13 @@ except:
     plot_history = None
 import electroncash.web as web
 
-from .amountedit import AmountEdit, BTCAmountEdit, MyLineEdit, BTCkBEdit, BTCkBEdit2
+from .amountedit import AmountEdit, BTCAmountEdit, MyLineEdit, BTCkBEdit, BTCSatsByteEdit
 from .qrcodewidget import QRCodeWidget, QRDialog
 from .qrtextedit import ShowQRTextEdit, ScanQRTextEdit
 from .transaction_dialog import show_transaction
 from .fee_slider import FeeSlider
 
 from .util import *
-
 
 class StatusBarButton(QPushButton):
     def __init__(self, icon, tooltip, func):
@@ -103,6 +102,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
     computing_privkeys_signal = pyqtSignal()
     show_privkeys_signal = pyqtSignal()
     cashaddr_toggled_signal = pyqtSignal()
+    history_updated_signal = pyqtSignal()
 
     def __init__(self, gui_object, wallet):
         QMainWindow.__init__(self)
@@ -124,10 +124,12 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.checking_accounts = False
         self.qr_window = None
         self.not_enough_funds = False
+        self.op_return_toolong = False
         self.internalpluginsdialog = None
         self.externalpluginsdialog = None
         self.require_fee_update = False
         self.tx_notifications = []
+        self.tx_notify_timer = None
         self.tl_windows = []
         self.tx_external_keypairs = {}
 
@@ -211,10 +213,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.new_fx_history_signal.connect(self.on_fx_history)
 
         # update fee slider in case we missed the callback
-        if self.config.get('customfee') is None:
-            self.fee_slider.update()
-        else:
-            self.fee_slider.deactivate() 
+        self.fee_slider.update()
         self.load_wallet(wallet)
         self.connect_slots(gui_object.timer)
         self.fetch_alias()
@@ -229,6 +228,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.history_list.refresh_headers()
         self.history_list.update()
         self.address_list.update()
+        self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
 
     def on_quotes(self, b):
         self.new_fx_quotes_signal.emit()
@@ -243,6 +243,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         # History tab needs updating if it used spot
         if self.fx.history_used_spot:
             self.history_list.update()
+            self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
 
     def toggle_tab(self, tab):
         show = not self.config.get('show_{}_tab'.format(tab.tab_name), False)
@@ -312,8 +313,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 .emit(event, args)
 
         elif event == 'new_transaction':
-            self.tx_notifications.append(args[0])
-            self.notify_transactions_signal.emit()
+            tx, wallet = args
+            if wallet == self.wallet: # filter out tx's not for this wallet
+                self.tx_notifications.append(tx)
+                self.notify_transactions_signal.emit()
         elif event in ['status', 'banner', 'verified', 'fee']:
             # Handle in GUI thread
             self.network_signal.emit(event, args)
@@ -375,6 +378,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         else:
             self.show()
         self.watching_only_changed()
+        self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
         run_hook('load_wallet', wallet, self)
 
     def init_geometry(self):
@@ -458,7 +462,11 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         if filename in recent:
             recent.remove(filename)
         recent.insert(0, filename)
-        recent = recent[:5]
+        recent2 = []
+        for k in recent:
+            if os.path.exists(k):
+                recent2.append(k)
+        recent = recent2[:5]
         self.config.set_key('recently_open', recent)
         self.recently_visited_menu.clear()
         for i, k in enumerate(sorted(recent)):
@@ -589,35 +597,60 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
     def show_report_bug(self):
         msg = ' '.join([
             _("Please report any bugs as issues on github:<br/>"),
-            "<a href=\"https://github.com/fyookball/electrum/issues\">https://github.com/fyookball/electrum/issues</a><br/><br/>",
+            "<a href=\"https://github.com/Electron-Cash/Electron-Cash/issues\">https://github.com/Electron-Cash/Electron-Cash/issues</a><br/><br/>",
             _("Before reporting a bug, upgrade to the most recent version of Electron Cash (latest release or git HEAD), and include the version number in your report."),
             _("Try to explain not only what the bug is, but how it occurs.")
          ])
         self.show_message(msg, title="Electron Cash - " + _("Reporting Bugs"))
 
-    def notify_transactions(self):
-        if not self.network or not self.network.is_connected():
-            return
-        self.print_error("Notifying GUI")
-        if len(self.tx_notifications) > 0:
-            # Combine the transactions if there are at least three
+    last_notify_tx_time = 0.0
+    notify_tx_rate = 30.0
+
+    def notify_tx_cb(self):
+        n_ok = 0
+        if self.network and self.network.is_connected() and self.wallet:
             num_txns = len(self.tx_notifications)
-            if num_txns >= 3:
+            if num_txns:
+                # Combine the transactions
                 total_amount = 0
                 for tx in self.tx_notifications:
-                    is_relevant, is_mine, v, fee = self.wallet.get_wallet_delta(tx)
-                    if v > 0:
-                        total_amount += v
-                self.notify(_("{} new transactions received: Total amount received in the new transactions {}")
-                            .format(num_txns, self.format_amount_and_units(total_amount)))
-                self.tx_notifications = []
-            else:
-                for tx in self.tx_notifications:
                     if tx:
-                        self.tx_notifications.remove(tx)
                         is_relevant, is_mine, v, fee = self.wallet.get_wallet_delta(tx)
-                        if v > 0:
-                            self.notify(_("New transaction received: {}").format(self.format_amount_and_units(v)))
+                        if v > 0 and is_relevant:
+                            total_amount += v
+                            n_ok += 1
+                if n_ok:
+                    self.print_error("Notifying GUI %d tx"%(n_ok))
+                    if n_ok > 1:
+                        self.notify(_("{} new transactions received: Total amount received in the new transactions {}")
+                                    .format(n_ok, self.format_amount_and_units(total_amount)))
+                    else:
+                        self.notify(_("New transaction received: {}").format(self.format_amount_and_units(total_amount)))
+        self.tx_notifications = list()
+        self.last_notify_tx_time = time.time() if n_ok else self.last_notify_tx_time
+        if self.tx_notify_timer:
+            self.tx_notify_timer.stop()
+            self.tx_notify_timer = None
+
+
+    def notify_transactions(self):
+        if self.tx_notify_timer or not len(self.tx_notifications) or self.cleaned_up:
+            # common case: extant notify timer -- we already enqueued to notify. So bail and wait for timer to handle it.
+            return
+        elapsed = time.time() - self.last_notify_tx_time
+        if elapsed < self.notify_tx_rate:
+            # spam control. force tx notify popup to not appear more often than every 30 seconds by enqueing the request for a timer to
+            # handle it sometime later
+            self.tx_notify_timer = QTimer(self)
+            self.tx_notify_timer.setSingleShot(True)
+            self.tx_notify_timer.timeout.connect(self.notify_tx_cb)
+            when = (self.notify_tx_rate - elapsed)
+            self.print_error("Notify spam control: will notify GUI of %d new tx's in %f seconds"%(len(self.tx_notifications),when))
+            self.tx_notify_timer.start(when * 1e3) # time in ms
+        else:
+            # it's been a while since we got a tx notify -- so do it immediately (no timer necessary)
+            self.notify_tx_cb()
+
 
     def notify(self, message):
         if self.tray:
@@ -653,6 +686,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         if self.need_update.is_set():
             self.need_update.clear()
             self.update_wallet()
+
         # resolve aliases
         # FIXME this is a blocking network call that has a timeout of 5 sec
         self.payto_e.resolve()
@@ -735,6 +769,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         elif self.network.is_connected():
             server_height = self.network.get_server_height()
             server_lag = self.network.get_local_height() - server_height
+            num_chains = len(self.network.get_blockchains())
             # Server height can be 0 after switching to a new server
             # until we get a headers subscription request response.
             # Display the synchronizing message in that case.
@@ -743,7 +778,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 icon = QIcon(":icons/status_waiting.png")
             elif server_lag > 1:
                 text = _("Server is lagging ({} blocks)").format(server_lag)
-                icon = QIcon(":icons/status_lagging.png")
+                icon = QIcon(":icons/status_lagging.png") if num_chains <= 1 else QIcon(":icons/status_lagging_fork.png")
             else:
                 c, u, x = self.wallet.get_balance()
                 text =  _("Balance" ) + ": %s "%(self.format_amount_and_units(c))
@@ -757,9 +792,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                     text += self.fx.get_fiat_status_text(c + u + x,
                         self.base_unit(), self.get_decimal_point()) or ''
                 if not self.network.proxy:
-                    icon = QIcon(":icons/status_connected.png")
+                    icon = QIcon(":icons/status_connected.png") if num_chains <= 1 else QIcon(":icons/status_connected_fork.png")
                 else:
-                    icon = QIcon(":icons/status_connected_proxy.png")
+                    icon = QIcon(":icons/status_connected_proxy.png") if num_chains <= 1 else QIcon(":icons/status_connected_proxy_fork.png")
         else:
             text = _("Not connected")
             icon = QIcon(":icons/status_disconnected.png")
@@ -782,6 +817,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.contact_list.update()
         self.invoice_list.update()
         self.update_completions()
+        self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
 
     def create_history_tab(self):
         from .history_list import HistoryList
@@ -1078,12 +1114,27 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.message_e = MyLineEdit()
         grid.addWidget(self.message_e, 2, 1, 1, -1)
 
+        msg_opreturn = ( _('OP_RETURN data (optional).') + '\n\n'
+                        + _('Posts a PERMANENT note to the BCH blockchain as part of this transaction.')
+                        + '\n\n' + _('If you specify OP_RETURN text, you may leave the \'Pay to\' field blank.') )
+        self.opreturn_label = HelpLabel(_('OP_RETURN'), msg_opreturn)
+        grid.addWidget(self.opreturn_label,  3, 0)
+        self.message_opreturn_e = MyLineEdit()
+        grid.addWidget(self.message_opreturn_e,  3 , 1, 1, -1)
+
+        if not self.config.get('enable_opreturn'):
+            self.message_opreturn_e.setText("")
+            self.message_opreturn_e.setHidden(True)
+            self.opreturn_label.setHidden(True)
+
+
+
         self.from_label = QLabel(_('From'))
-        grid.addWidget(self.from_label, 3, 0)
+        grid.addWidget(self.from_label, 4, 0)
         self.from_list = MyTreeWidget(self, self.from_list_menu, ['',''])
         self.from_list.setHeaderHidden(True)
         self.from_list.setMaximumHeight(80)
-        grid.addWidget(self.from_list, 3, 1, 1, -1)
+        grid.addWidget(self.from_list, 4, 1, 1, -1)
         self.set_pay_from([])
 
         msg = _('Amount to be sent.') + '\n\n' \
@@ -1091,22 +1142,22 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
               + _('Note that if you have frozen some of your addresses, the available funds will be lower than your total balance.') + '\n\n' \
               + _('Keyboard shortcut: type "!" to send all your coins.')
         amount_label = HelpLabel(_('Amount'), msg)
-        grid.addWidget(amount_label, 4, 0)
-        grid.addWidget(self.amount_e, 4, 1)
+        grid.addWidget(amount_label, 5, 0)
+        grid.addWidget(self.amount_e, 5, 1)
 
         self.fiat_send_e = AmountEdit(self.fx.get_currency if self.fx else '')
         if not self.fx or not self.fx.is_enabled():
             self.fiat_send_e.setVisible(False)
-        grid.addWidget(self.fiat_send_e, 4, 2)
+        grid.addWidget(self.fiat_send_e, 5, 2)
         self.amount_e.frozen.connect(
             lambda: self.fiat_send_e.setFrozen(self.amount_e.isReadOnly()))
 
         self.max_button = EnterButton(_("Max"), self.spend_max)
         self.max_button.setFixedWidth(140)
-        grid.addWidget(self.max_button, 4, 3)
+        grid.addWidget(self.max_button, 5, 3)
         hbox = QHBoxLayout()
         hbox.addStretch(1)
-        grid.addLayout(hbox, 4, 4)
+        grid.addLayout(hbox, 5, 4)
 
         msg = _('Bitcoin Cash transactions are in general not free. A transaction fee is paid by the sender of the funds.') + '\n\n'\
               + _('The amount of fee can be decided freely by the sender. However, transactions with low fees take more time to be processed.') + '\n\n'\
@@ -1123,6 +1174,14 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.fee_slider = FeeSlider(self, self.config, fee_cb)
         self.fee_slider.setFixedWidth(140)
 
+        self.fee_custom_lbl = HelpLabel(self.get_custom_fee_text(),
+                                        _('This is the fee rate that will be used for this transaction.')
+                                        + "\n\n" + _('It is calculated from the Custom Fee Rate in preferences, but can be overridden from the manual fee edit on this form (if enabled).')
+                                        + "\n\n" + _('Generally, a fee of 1.0 sats/B is a good minimal rate to ensure your transaction will make it into the next block.'))
+        self.fee_custom_lbl.setFixedWidth(140)
+
+        self.fee_slider_mogrifier()
+
         self.fee_e = BTCAmountEdit(self.get_decimal_point)
         if not self.config.get('show_fee', False):
             self.fee_e.setVisible(False)
@@ -1132,9 +1191,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.fee_e.editingFinished.connect(self.update_fee)
         self.connect_fields(self, self.amount_e, self.fiat_send_e, self.fee_e)
 
-        grid.addWidget(self.fee_e_label, 5, 0)
-        grid.addWidget(self.fee_slider, 5, 1)
-        grid.addWidget(self.fee_e, 5, 2)
+        grid.addWidget(self.fee_e_label, 6, 0)
+        grid.addWidget(self.fee_slider, 6, 1)
+        grid.addWidget(self.fee_custom_lbl, 6, 1)
+        grid.addWidget(self.fee_e, 6, 2)
 
         self.preview_button = EnterButton(_("Preview"), self.do_preview)
         self.preview_button.setToolTip(_('Display the details of your transactions before signing it.'))
@@ -1145,11 +1205,14 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         buttons.addWidget(self.clear_button)
         buttons.addWidget(self.preview_button)
         buttons.addWidget(self.send_button)
-        grid.addLayout(buttons, 6, 1, 1, 3)
+        grid.addLayout(buttons, 7, 1, 1, 3)
 
         self.amount_e.shortcut.connect(self.spend_max)
         self.payto_e.textChanged.connect(self.update_fee)
         self.amount_e.textEdited.connect(self.update_fee)
+        self.message_opreturn_e.textEdited.connect(self.update_fee)
+        self.message_opreturn_e.textChanged.connect(self.update_fee)
+        self.message_opreturn_e.editingFinished.connect(self.update_fee)
 
         def reset_max(t):
             self.is_max = False
@@ -1172,13 +1235,21 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 amt_color, fee_color = ColorScheme.DEFAULT, ColorScheme.BLUE
             else:
                 amt_color, fee_color = ColorScheme.BLUE, ColorScheme.BLUE
+            opret_color = ColorScheme.DEFAULT
+            if self.op_return_toolong:
+                opret_color = ColorScheme.RED
+                text = _("OP_RETURN message too large, needs to be under 220 bytes") + (", " if text else "") + text
 
             self.statusBar().showMessage(text)
             self.amount_e.setStyleSheet(amt_color.as_stylesheet())
             self.fee_e.setStyleSheet(fee_color.as_stylesheet())
+            self.message_opreturn_e.setStyleSheet(opret_color.as_stylesheet())
 
         self.amount_e.textChanged.connect(entry_changed)
         self.fee_e.textChanged.connect(entry_changed)
+        self.message_opreturn_e.textChanged.connect(entry_changed)
+        self.message_opreturn_e.textEdited.connect(entry_changed)
+        self.message_opreturn_e.editingFinished.connect(entry_changed)
 
         self.invoices_label = QLabel(_('Invoices'))
         from .invoice_list import InvoiceList
@@ -1212,6 +1283,26 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             return r
         return (TYPE_ADDRESS, self.wallet.dummy_address())
 
+    def get_custom_fee_text(self, fee_rate = None):
+        if not self.config.has_custom_fee_rate():
+            return ""
+        else:
+            if fee_rate is None: fee_rate = self.config.custom_fee_rate() / 1000.0
+            return str(round(fee_rate*100)/100) + " sats/B"
+
+    @staticmethod
+    def output_for_opreturn_stringdata(op_return):
+        if not isinstance(op_return, str):
+            raise OPReturnError('OP_RETURN parameter needs to be of type str!')
+        op_return_code = "OP_RETURN "
+        op_return_encoded = op_return.encode('utf-8')
+        if len(op_return_encoded) > 220:
+            raise OPReturnTooLarge(_("OP_RETURN message too large, needs to be under 220 bytes"))
+        op_return_payload = op_return_encoded.hex()
+        script = op_return_code + op_return_payload
+        amount = 0
+        return (TYPE_SCRIPT, ScriptOutput.from_string(script), amount)
+
     def do_update_fee(self):
         '''Recalculate the fee.  If the fee was manually input, retain it, but
         still build the TX to see if there are enough funds.
@@ -1219,6 +1310,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         freeze_fee = (self.fee_e.isModified()
                       and (self.fee_e.text() or self.fee_e.hasFocus()))
         amount = '!' if self.is_max else self.amount_e.get_amount()
+        fee_rate = None
         if amount is None:
             if not freeze_fee:
                 self.fee_e.setAmount(None)
@@ -1231,12 +1323,22 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 _type, addr = self.get_payto_or_dummy()
                 outputs = [(_type, addr, amount)]
             try:
+                opreturn_message = self.message_opreturn_e.text() if self.config.get('enable_opreturn') else None
+                if opreturn_message:
+                    outputs.append(self.output_for_opreturn_stringdata(opreturn_message))
                 tx = self.wallet.make_unsigned_transaction(self.get_coins(), outputs, self.config, fee)
                 self.not_enough_funds = False
+                self.op_return_toolong = False
             except NotEnoughFunds:
                 self.not_enough_funds = True
                 if not freeze_fee:
                     self.fee_e.setAmount(None)
+                return
+            except OPReturnTooLarge:
+                self.op_return_toolong = True
+                return
+            except OPReturnError as e:
+                self.statusBar().showMessage(str(e))
                 return
             except BaseException:
                 return
@@ -1248,7 +1350,15 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             if self.is_max:
                 amount = tx.output_value()
                 self.amount_e.setAmount(amount)
+            if fee is not None:
+                fee_rate = fee / tx.estimated_size()
+        self.fee_slider_mogrifier(self.get_custom_fee_text(fee_rate))
 
+    def fee_slider_mogrifier(self, text = None):
+        fee_slider_hidden = self.config.has_custom_fee_rate()
+        self.fee_slider.setHidden(fee_slider_hidden)
+        self.fee_custom_lbl.setHidden(not fee_slider_hidden)
+        if text is not None: self.fee_custom_lbl.setText(text)
 
     def from_list_delete(self, item):
         i = self.from_list.indexOfTopLevelItem(item)
@@ -1338,6 +1448,18 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 if not self.question(msg):
                     return
 
+        try:
+            # handle op_return if specified and enabled
+            opreturn_message = self.message_opreturn_e.text() if self.config.get('enable_opreturn') else None
+            if opreturn_message:
+                outputs.append(self.output_for_opreturn_stringdata(opreturn_message))
+        except OPReturnTooLarge as e:
+            self.show_error(str(e))
+            return
+        except OPReturnError as e:
+            self.show_error(str(e))
+            return
+
         if not outputs:
             self.show_error(_('No outputs'))
             return
@@ -1406,6 +1528,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         if (fee < (tx.estimated_size())):
             msg.append(_('Warning') + ': ' + _("You're using a fee less than 1000 sats/kb.  It may take a very long time to confirm."))
 
+        if self.config.get('enable_opreturn') and self.message_opreturn_e.text():
+            msg.append(_("You are using an OP_RETURN message. This gets permanently written to the blockchain."))
+
         if self.wallet.has_password():
             msg.append("")
             msg.append(_("Enter your password to proceed"))
@@ -1455,19 +1580,23 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
 
         def broadcast_thread():
             # non-GUI thread
+            status = False
+            msg = "Failed"
             pr = self.payment_request
             if pr and pr.has_expired():
                 self.payment_request = None
                 return False, _("Payment request has expired")
-            status, msg =  self.network.broadcast(tx)
-            if pr and status is True:
-                self.invoices.set_paid(pr, tx.txid())
-                self.invoices.save()
-                self.payment_request = None
+            if pr:
                 refund_address = self.wallet.get_receiving_addresses()[0]
-                ack_status, ack_msg = pr.send_ack(str(tx), refund_address)
+                ack_status, ack_msg = pr.send_payment(str(tx), refund_address)
+                msg = ack_msg
                 if ack_status:
-                    msg = ack_msg
+                    self.invoices.set_paid(pr, tx.txid())
+                    self.invoices.save()
+                    self.payment_request = None
+                    status = True
+            else:
+                status, msg =  self.network.broadcast_transaction(tx)
             return status, msg
 
         # Capture current TL window; override might be removed on return
@@ -1509,6 +1638,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.payto_e.is_pr = True
         for e in [self.payto_e, self.amount_e, self.message_e]:
             e.setFrozen(True)
+        self.max_button.setDisabled(True)
         self.payto_e.setText(_("please wait..."))
         return True
 
@@ -1583,11 +1713,13 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
     def do_clear(self):
         self.is_max = False
         self.not_enough_funds = False
+        self.op_return_toolong = False
         self.payment_request = None
         self.payto_e.is_pr = False
-        for e in [self.payto_e, self.message_e, self.amount_e, self.fiat_send_e, self.fee_e]:
+        for e in [self.payto_e, self.message_e, self.amount_e, self.fiat_send_e, self.fee_e, self.message_opreturn_e]:
             e.setText('')
             e.setFrozen(False)
+        self.max_button.setDisabled(False)
         self.set_pay_from([])
         self.tx_external_keypairs = {}
         self.update_status()
@@ -1596,6 +1728,11 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
     def set_frozen_state(self, addrs, freeze):
         self.wallet.set_frozen_state(addrs, freeze)
         self.address_list.update()
+        self.utxo_list.update()
+        self.update_fee()
+
+    def set_frozen_coin_state(self, utxos, freeze):
+        self.wallet.set_frozen_coin_state(utxos, freeze)
         self.utxo_list.update()
         self.update_fee()
 
@@ -1694,13 +1831,14 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.wallet.delete_address(addr)
             self.address_list.update()
             self.history_list.update()
+            self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
             self.clear_receive_tab()
 
     def get_coins(self, isInvoice = False):
         if self.pay_from:
             return self.pay_from
         else:
-            return self.wallet.get_spendable_coins(None, self.config,isInvoice)
+            return self.wallet.get_spendable_coins(None, self.config, isInvoice)
 
     def spend_coins(self, coins):
         self.set_pay_from(coins)
@@ -1734,21 +1872,33 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.show_error(_('Invalid Address'))
             self.contact_list.update()  # Displays original unchanged value
             return False
+        old_entry = self.contacts.get(address, None)
         self.contacts[address] = ('address', label)
         self.contact_list.update()
         self.history_list.update()
+        self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
         self.update_completions()
+
+        # The contact has changed, update any addresses that are displayed with the old information.
+        run_hook('update_contact', address, self.contacts[address], old_entry)
         return True
 
-    def delete_contacts(self, labels):
+    def delete_contacts(self, addresses):
         if not self.question(_("Remove {} from your list of contacts?")
-                             .format(" + ".join(labels))):
+                             .format(" + ".join(addresses))):
             return
-        for label in labels:
-            self.contacts.pop(label)
+        removed_entries = []
+        for address in addresses:
+            if address in self.contacts.keys():
+                removed_entries.append((address, self.contacts[address]))
+            self.contacts.pop(address)
+
         self.history_list.update()
+        self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
         self.contact_list.update()
         self.update_completions()
+
+        run_hook('delete_contacts', removed_entries)
 
     def show_invoice(self, key):
         pr = self.invoices.get(key)
@@ -1786,6 +1936,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             if self.question(_('Delete invoice?')):
                 self.invoices.remove(key)
                 self.history_list.update()
+                self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
                 self.invoice_list.update()
                 d.close()
         deleteButton = EnterButton(_('Delete'), do_delete)
@@ -1821,9 +1972,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         c = commands.Commands(self.config, self.wallet, self.network, lambda: self.console.set_json(True))
         methods = {}
         def mkfunc(f, method):
-            return lambda *args: f(method, args, self.password_dialog)
+            return lambda *args, **kwargs: f(method, *args, password_getter=self.password_dialog,
+                                             **kwargs)
         for m in dir(c):
-            if m[0]=='_' or m in ['network','wallet']: continue
+            if m[0]=='_' or m in ['network','wallet','config']: continue
             methods[m] = mkfunc(c._run, m)
 
         console.updateNamespace(methods)
@@ -1973,6 +2125,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.gui_object.daemon.stop_wallet(wallet_path)
         self.close()
         os.unlink(wallet_path)
+        self.update_recently_visited(wallet_path) # this ensures it's deleted from the menu
         self.show_error("Wallet removed:" + basename)
 
     @protected
@@ -2389,6 +2542,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.show_critical(_("Electron Cash was unable to import your labels.") + "\n" + str(reason))
         self.address_list.update()
         self.history_list.update()
+        self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
 
     def do_export_labels(self):
         labels = self.wallet.labels
@@ -2532,6 +2686,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.show_critical(_("The following inputs could not be imported") + ':\n'+ '\n'.join(bad))
         self.address_list.update()
         self.history_list.update()
+        self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
 
     def import_addresses(self):
         if not self.wallet.can_import_address():
@@ -2556,6 +2711,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.fiat_receive_e.setVisible(b)
         self.history_list.refresh_headers()
         self.history_list.update()
+        self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
         self.address_list.refresh_headers()
         self.address_list.update()
         self.update_status()
@@ -2602,16 +2758,25 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         lang_label = HelpLabel(_('Language') + ':', lang_help)
         lang_combo = QComboBox()
         from electroncash.i18n import languages
-        lang_combo.addItems(list(languages.values()))
+
+        language_names = []
+        language_keys = []
+        for item in languages.items():
+            language_keys.append(item[0])
+            language_names.append(item[1])
+        lang_combo.addItems(language_names)
         try:
-            index = languages.keys().index(self.config.get("language",''))
-        except Exception:
+            index = language_keys.index(self.config.get("language",''))
+        except ValueError:
             index = 0
         lang_combo.setCurrentIndex(index)
+
         if not self.config.is_modifiable('language'):
-            for w in [lang_combo, lang_label]: w.setEnabled(False)
+            for w in [lang_combo, lang_label]:
+                w.setEnabled(False)
+
         def on_lang(x):
-            lang_request = list(languages.keys())[lang_combo.currentIndex()]
+            lang_request = language_keys[lang_combo.currentIndex()]
             if lang_request != self.config.get('language'):
                 self.config.set_key("language", lang_request, True)
                 self.need_restart = True
@@ -2632,23 +2797,22 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 self.num_zeros = value
                 self.config.set_key('num_zeros', value, True)
                 self.history_list.update()
+                self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
                 self.address_list.update()
         nz.valueChanged.connect(on_nz)
         gui_widgets.append((nz_label, nz))
 
         def on_customfee(x):
-            m = customfee_e.get_amount()
-            if (m is None):
-                self.fee_slider.update()
-            else:
-                self.fee_slider.deactivate()
-            self.config.set_key('customfee', m) 
+            amt = customfee_e.get_amount()
+            m = int(amt * 1000.0) if amt is not None else None
+            self.config.set_key('customfee', m)
+            self.fee_slider.update()
+            self.fee_slider_mogrifier()
 
-    
-        customfee_e = BTCkBEdit2(self.get_decimal_point) 
-        customfee_e.setAmount(self.config.custom_fee_rate())
+        customfee_e = BTCSatsByteEdit()
+        customfee_e.setAmount(self.config.custom_fee_rate() / 1000.0 if self.config.has_custom_fee_rate() else None)
         customfee_e.textChanged.connect(on_customfee)
-        customfee_label = HelpLabel(_('Custom Fee Rate'), _('Custom Fee Rate in Satoshis per kB')) 
+        customfee_label = HelpLabel(_('Custom Fee Rate'), _('Custom Fee Rate in Satoshis per byte'))
         fee_widgets.append((customfee_label, customfee_e))
 
         feebox_cb = QCheckBox(_('Edit fees manually'))
@@ -2735,6 +2899,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             self.config.set_key('decimal_point', self.decimal_point, True)
             nz.setMaximum(self.decimal_point)
             self.history_list.update()
+            self.history_updated_signal.emit() # inform things like address_dialog that there's a new history
             self.request_list.update()
             self.address_list.update()
             for edit, amount in zip(edits, amounts):
@@ -2819,6 +2984,22 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         fiat_address_checkbox = QCheckBox()
         ccy_combo = QComboBox()
         ex_combo = QComboBox()
+
+
+        def on_opret(x):
+            self.config.set_key('enable_opreturn', bool(x))
+            if not x:
+                self.message_opreturn_e.setText("")
+                self.op_return_toolong = False
+            self.message_opreturn_e.setHidden(not x)
+            self.opreturn_label.setHidden(not x)
+
+        enable_opreturn = bool(self.config.get('enable_opreturn'))
+        opret_cb = QCheckBox(_('Enable OP_RETURN output'))
+        opret_cb.setToolTip(_('Enable posting messages with OP_RETURN.'))
+        opret_cb.setChecked(enable_opreturn)
+        opret_cb.stateChanged.connect(on_opret)
+        tx_widgets.append((opret_cb,None))
 
         def update_currencies():
             if not self.fx: return
@@ -2947,7 +3128,11 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.wallet.thread.stop()
         if self.network:
             self.network.unregister_callback(self.on_network)
-            
+
+        if self.tx_notify_timer:
+            self.tx_notify_timer.stop()
+            self.tx_notify_timer = None
+
         # We catch these errors with the understanding that there is no recovery at
         # this point, given user has likely performed an action we cannot recover
         # cleanly from.  So we attempt to exit as cleanly as possible.

@@ -342,6 +342,11 @@ class BIP32_KeyStore(Deterministic_KeyStore, Xpub):
 
     def check_password(self, password):
         xprv = pw_decode(self.xprv, password)
+        try:
+            assert DecodeBase58Check(xprv) is not None
+        except Exception:
+            # Password was None but key was encrypted.
+            raise InvalidPassword()
         if deserialize_xprv(xprv)[4] != deserialize_xpub(self.xpub)[4]:
             raise InvalidPassword()
 
@@ -591,13 +596,12 @@ def bip39_normalize_passphrase(passphrase):
     return normalize('NFKD', passphrase or '')
 
 def bip39_to_seed(mnemonic, passphrase):
-    import pbkdf2, hashlib, hmac
+    import hashlib, hmac
     PBKDF2_ROUNDS = 2048
     mnemonic = normalize('NFKD', ' '.join(mnemonic.split()))
     passphrase = bip39_normalize_passphrase(passphrase)
-    return pbkdf2.PBKDF2(mnemonic, 'mnemonic' + passphrase,
-                         iterations = PBKDF2_ROUNDS, macmodule = hmac,
-                         digestmodule = hashlib.sha512).read(64)
+    return hashlib.pbkdf2_hmac('sha512', mnemonic.encode('utf-8'),
+        b'mnemonic' + passphrase.encode('utf-8'), iterations = PBKDF2_ROUNDS)
 
 # returns tuple (is_checksum_valid, is_wordlist_valid)
 def bip39_is_checksum_valid(mnemonic):
@@ -753,8 +757,11 @@ def from_seed(seed, passphrase, is_p2sh):
         xtype = 'standard'
         keystore.add_xprv_from_seed(bip32_seed, xtype, der)
     else:
-        raise BaseException(t)
+        raise InvalidSeed()
     return keystore
+
+class InvalidSeed(Exception):
+    pass
 
 def from_private_key_list(text):
     keystore = Imported_KeyStore({})

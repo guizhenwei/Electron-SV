@@ -9,6 +9,12 @@ Electron Cash - Lightweight Bitcoin Cash client
   Homepage: https://electroncash.org/
 
 
+.. image:: https://d322cqt584bo4o.cloudfront.net/electron-cash/localized.svg
+    :target: https://crowdin.com/project/electron-cash
+    :alt: Help translate Electron Cash online
+
+
+
 
 
 Getting started
@@ -45,8 +51,8 @@ Development version
 
 Check out the code from Github::
 
-    git clone git://github.com/fyookball/electrum.git
-    cd electrum
+    git clone https://github.com/Electron-Cash/Electron-Cash
+    cd Electron-Cash
 
 Run install (this should install dependencies)::
 

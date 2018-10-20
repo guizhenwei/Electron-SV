@@ -32,6 +32,7 @@ except ImportError:
     sys.exit("install SimpleWebSocketServer")
 
 from . import util
+from .address import Address
 
 request_queue = queue.Queue()
 
@@ -64,7 +65,7 @@ class WsClientThread(util.DaemonThread):
         # read json file
         rdir = self.config.get('requests_dir')
         n = os.path.join(rdir, 'req', request_id[0], request_id[1], request_id, request_id + '.json')
-        with open(n) as f:
+        with open(n, encoding='utf-8') as f:
             s = f.read()
         d = json.loads(s)
         addr = d.get('address')
@@ -84,7 +85,7 @@ class WsClientThread(util.DaemonThread):
             l = self.subscriptions.get(addr, [])
             l.append((ws, amount))
             self.subscriptions[addr] = l
-            h = self.network.addr_to_scripthash(addr)
+            h = Address.from_string(addr).to_scripthash_hex()
             self.network.send([('blockchain.scripthash.subscribe', [h])], self.response_queue.put)
 
 
