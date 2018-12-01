@@ -252,6 +252,12 @@ class Interface(util.PrintError):
     - Member variable server.
     """
 
+    MODE_DEFAULT = 'default'
+    MODE_BACKWARD = 'backward'
+    MODE_BINARY = 'binary'
+    MODE_CATCH_UP = 'catch_up'
+    MODE_VERIFICATION = 'verification'
+
     def __init__(self, server, socket):
         self.server = server
         self.host, _, _ = server.rsplit(':', 2)
@@ -307,8 +313,8 @@ class Interface(util.PrintError):
         wire_requests = self.unsent_requests[0:n]
         try:
             self.pipe.send_all([make_dict(*r) for r in wire_requests])
-        except socket.error as e:
-            self.print_error("socket error:", e)
+        except (OSError, ssl.SSLError) as e:
+            self.print_error("send_requests: {}: {}".format(type(e).__name__, e))
             return False
         self.unsent_requests = self.unsent_requests[n:]
         for request in wire_requests:
