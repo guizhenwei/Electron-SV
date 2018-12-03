@@ -31,3 +31,4 @@ xcuserdata/
 
 # IntelliJ Pycharm IDE
 /.idea
+venv/
