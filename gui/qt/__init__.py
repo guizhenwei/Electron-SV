@@ -274,5 +274,7 @@ class ElectrumGui:
         self.app.aboutToQuit.connect(clean_up)
 
         # main loop
+        import qdarkstyle
+        self.app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())  # Make it black.
         self.app.exec_()
         # on some platforms the exec_ call may not return, so use clean_up()

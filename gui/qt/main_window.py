@@ -690,9 +690,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         if self.decimal_point == 2:
             return 'cash'
         if self.decimal_point == 5:
-            return 'mBCH'
+            return 'mBSV'
         if self.decimal_point == 8:
-            return 'BCH'
+            return 'BSV'
         raise Exception('Unknown base unit')
 
     def connect_fields(self, window, btc_e, fiat_e, fee_e):
@@ -2854,9 +2854,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         SSL_id_e.setReadOnly(True)
         id_widgets.append((SSL_id_label, SSL_id_e))
 
-        units = ['BCH', 'mBCH', 'cash']
+        units = ['BSV', 'mBSV', 'cash']
         msg = _('Base unit of your wallet.')\
-              + '\n1 BCH = 1,000 mBCH = 1,000,000 cash.\n' \
+              + '\n1 BSV = 1,000 mBSV = 1,000,000 cash.\n' \
               + _(' These settings affects the fields in the Send tab')+' '
         unit_label = HelpLabel(_('Base unit') + ':', msg)
         unit_combo = QComboBox()
