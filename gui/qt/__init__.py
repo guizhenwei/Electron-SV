@@ -161,7 +161,7 @@ class ElectrumGui:
 
     def show_network_dialog(self, parent):
         if not self.daemon.network:
-            parent.show_warning(_('You are using Electron Cash in offline mode; restart Electron Cash if you want to get connected'), title=_('Offline'))
+            parent.show_warning(_('You are using Electron SV in offline mode; restart Electron SV if you want to get connected'), title=_('Offline'))
             return
         if self.nd:
             self.nd.on_update()
