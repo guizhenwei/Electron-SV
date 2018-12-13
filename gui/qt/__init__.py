@@ -106,7 +106,7 @@ class ElectrumGui:
         # init tray
         self.dark_icon = self.config.get("dark_icon", False)
         self.tray = QSystemTrayIcon(self.tray_icon(), None)
-        self.tray.setToolTip('Electron Cash')
+        self.tray.setToolTip('Electron SV')
         self.tray.activated.connect(self.tray_activated)
         self.build_tray_menu()
         self.tray.show()
@@ -128,7 +128,7 @@ class ElectrumGui:
             submenu.addAction(_("Close"), window.close)
         m.addAction(_("Dark/Light"), self.toggle_tray_icon)
         m.addSeparator()
-        m.addAction(_("Exit Electron Cash"), self.close)
+        m.addAction(_("Exit Electron SV"), self.close)
         self.tray.setContextMenu(m)
 
     def tray_icon(self):
