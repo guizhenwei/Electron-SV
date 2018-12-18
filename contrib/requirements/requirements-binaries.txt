@@ -1,4 +1,4 @@
 PyQt5
 pycryptodomex
 websocket-client
-QDarkStyle>=2.6.4
+QDarkStyle>=2.6.5
